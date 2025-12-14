@@ -1,0 +1,34 @@
+{
+  "project_info": {
+    "project_number": "256487422031",
+    "project_id": "sketchshare-47875",
+    "storage_bucket": "sketchshare-47875.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:256487422031:android:be6db80095605586bc923a",
+        "android_client_info": {
+          "package_name": "com.example.sketchshare"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "256487422031-clq7bjlfsb1cv62o85b48gmnq78vnoeu.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBjNcX04YzbisZH0yBNxZ1MnDCchw4QEOE"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
