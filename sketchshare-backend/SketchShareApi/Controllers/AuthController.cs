@@ -1,85 +1,70 @@
-// Controllers/AuthController.cs
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using SketchShareApi.Data;
 using SketchShareApi.Models;
-using BCrypt.Net;
-
-
-namespace SketchShareApi.Controllers;
+using System.Security.Cryptography;
+using System.Text;
 
 [ApiController]
 [Route("api/[controller]")]
 public class AuthController : ControllerBase
 {
-    private readonly AppDbContext _db;
-    private readonly IWebHostEnvironment _env;
+    private readonly AppDbContext _context;
 
-    public AuthController(AppDbContext db, IWebHostEnvironment env)
+    public AuthController(AppDbContext context)
     {
-        _db = db;
-        _env = env;
+        _context = context;
     }
 
     [HttpPost("register")]
-    public async Task<ActionResult> Register([FromBody] RegisterDto dto)
+    public async Task<ActionResult<User>> Register(User request)
     {
-        if (await _db.Users.AnyAsync(u => u.Email == dto.Email))
-            return BadRequest("Email уже занят");
+        var existingUser = await _context.Users.FirstOrDefaultAsync(u => u.Email == request.Email);
+        if (existingUser != null) return BadRequest("Email already exists");
+
+        string passwordHash = BCrypt.Net.BCrypt.HashPassword(request.PasswordHash);
 
         var user = new User
         {
-            Email = dto.Email,
-            PasswordHash = BCrypt.Net.BCrypt.HashPassword(dto.Password),
-            Name = dto.Name,
-            Nickname = dto.Nickname,
-            RoleId = 2 // обычный юзер
+            Name = request.Name,
+            Surname = request.Surname,
+            Nickname = request.Nickname,
+            Birthday = request.Birthday,
+            Email = request.Email,
+            Role_Id = request.Role_Id,
+            PasswordHash = passwordHash, // Используем Hash
+            Avatar = request.Avatar,
         };
 
-        _db.Users.Add(user);
-        await _db.SaveChangesAsync();
+        _context.Users.Add(user);
+        await _context.SaveChangesAsync();
 
-        return Ok(new { message = "Регистрация успешна", userId = user.Id });
+        return Ok(user);
     }
 
-    [HttpPost("upload-avatar/{userId}")]
-    public async Task<ActionResult<string>> UploadAvatar(int userId, IFormFile file)
+    [HttpPost("login")]
+    public async Task<ActionResult<User>> Login(User request)
     {
-        var user = await _db.Users.FindAsync(userId);
-        if (user == null) return NotFound();
+        var user = await _context.Users.FirstOrDefaultAsync(u => u.Email == request.Email);
+        if (user == null) return BadRequest("User not found");
 
-        if (file == null || file.Length == 0) return BadRequest("Файл пустой");
+        if (!BCrypt.Net.BCrypt.Verify(request.PasswordHash, user.PasswordHash)) {
+            return BadRequest("Wrong password");
+        }
 
-        var uploadsFolder = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot", "avatars");
-        Directory.CreateDirectory(uploadsFolder);
-
-        var fileName = $"{userId}_{Guid.NewGuid()}.jpg";
-        var filePath = Path.Combine(uploadsFolder, fileName);
-
-        await using var stream = new FileStream(filePath, FileMode.Create);
-        await file.CopyToAsync(stream);
-
-        var url = $"/avatars/{fileName}";
-        user.AvatarUrl = url;
-        await _db.SaveChangesAsync();
-
-        return Ok(url);
+        // Здесь можно добавить JWT или сессию, но для простоты возвращаем пользователя
+        return Ok(user);
     }
 
-    [HttpGet("profile/{userId}")]
-    public async Task<ActionResult<object>> GetProfile(int userId)
+    [HttpPost("update-avatar")]
+    public async Task<ActionResult<string>> UpdateAvatar(int userId, int avatar)
     {
-        var user = await _db.Users.FindAsync(userId);
+        var user = await _context.Users.FindAsync(userId);
         if (user == null) return NotFound();
 
-        return Ok(new
-        {
-            user.Name,
-            user.Nickname,
-            user.Email,
-            user.AvatarUrl
-        });
+        user.Avatar = avatar;
+        await _context.SaveChangesAsync();
+
+        return Ok(user.Avatar);
     }
 }
-
-public record RegisterDto(string Email, string Password, string Name, string Nickname);

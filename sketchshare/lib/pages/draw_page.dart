@@ -1,10 +1,14 @@
 import 'dart:ui' as ui;
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:http/http.dart' as http;
+import 'dart:convert';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class DrawPage extends StatefulWidget {
   const DrawPage({super.key});
@@ -20,6 +24,10 @@ class _DrawPageState extends State<DrawPage> {
   Color selectedColor = Colors.black;
   double strokeWidth = 5.0;
   bool showPanel = false;
+  bool _isZoomMode = false;
+  
+  final GlobalKey _canvasContainerKey = GlobalKey();
+  final ScrollController _toolsScrollController = ScrollController();
 
   final Map<String, Size> canvasSizes = {
     'Квадрат (1000x1000)': const Size(1000, 1000),
@@ -29,12 +37,11 @@ class _DrawPageState extends State<DrawPage> {
   };
   late Size canvasSize;
 
-  // Для масштабирования
-  final TransformationController _transformationController =
-      TransformationController();
+  Matrix4 _transform = Matrix4.identity();
   double _scale = 1.0;
-  bool _isScaling = false;
-  Offset _lastFocalPoint = Offset.zero;
+  Offset _offset = Offset.zero;
+  Offset? _lastFocalPoint;
+  bool _isPanning = false;
 
   @override
   void initState() {
@@ -71,8 +78,9 @@ class _DrawPageState extends State<DrawPage> {
     if (selected != null && canvasSizes[selected] != null) {
       setState(() {
         canvasSize = canvasSizes[selected]!;
-        _transformationController.value = Matrix4.identity();
+        _transform = Matrix4.identity();
         _scale = 1.0;
+        _offset = Offset.zero;
       });
     }
   }
@@ -93,165 +101,230 @@ class _DrawPageState extends State<DrawPage> {
     }
   }
 
-  void _onScaleStart(ScaleStartDetails details) {
-    if (details.pointerCount == 2) {
-      _isScaling = true;
-      _lastFocalPoint = details.focalPoint;
+  void _handleScaleStart(ScaleStartDetails details) {
+    if (_isZoomMode) {
+      _lastFocalPoint = details.localFocalPoint;
+      _isPanning = true;
+    } else {
+      try {
+        final renderBox = _canvasContainerKey.currentContext?.findRenderObject() as RenderBox?;
+        if (renderBox == null) return;
+        
+        final localPoint = renderBox.globalToLocal(details.focalPoint);
+        
+        final inverseMatrix = Matrix4.inverted(_transform);
+        final transformedPoint = MatrixUtils.transformPoint(
+          inverseMatrix, 
+          localPoint
+        );
+        
+        if (_isPointInCanvas(transformedPoint)) {
+          setState(() {
+            currentStroke = Stroke(
+              points: [transformedPoint],
+              color: selectedColor,
+              width: strokeWidth,
+              isEraser: tool == Tool.eraser,
+              toolType: tool,
+            );
+          });
+        }
+      } catch (e) {
+        debugPrint('Error in scale start: $e');
+      }
     }
   }
 
-  void _onScaleUpdate(ScaleUpdateDetails details) {
-    if (details.pointerCount == 2) {
-      _isScaling = true;
+  void _handleScaleUpdate(ScaleUpdateDetails details) {
+    if (_isZoomMode && _isPanning) {
       setState(() {
-        _scale = details.scale * _scale;
-        _scale = _scale.clamp(0.1, 10.0);
+        if (_lastFocalPoint != null) {
+          final delta = details.localFocalPoint - _lastFocalPoint!;
+          _offset += delta;
+          _lastFocalPoint = details.localFocalPoint;
+          
+          _transform = Matrix4.identity()
+            ..translate(_offset.dx, _offset.dy, 0.0)
+            ..scale(_scale, _scale, 1.0);
+        }
+      });
+    } else if (!_isZoomMode && currentStroke != null) {
+      try {
+        final renderBox = _canvasContainerKey.currentContext?.findRenderObject() as RenderBox?;
+        if (renderBox == null) return;
+        
+        final localPoint = renderBox.globalToLocal(details.focalPoint);
+        
+        final inverseMatrix = Matrix4.inverted(_transform);
+        final transformedPoint = MatrixUtils.transformPoint(
+          inverseMatrix, 
+          localPoint
+        );
+        
+        if (_isPointInCanvas(transformedPoint)) {
+          setState(() {
+            currentStroke!.points.add(transformedPoint);
+          });
+        } else {
+          setState(() {
+            strokes.add(currentStroke!);
+            undoStack.clear();
+            currentStroke = null;
+          });
+        }
+      } catch (e) {
+        debugPrint('Error in scale update: $e');
+        if (currentStroke != null) {
+          setState(() {
+            strokes.add(currentStroke!);
+            undoStack.clear();
+            currentStroke = null;
+          });
+        }
+      }
+    }
+  }
 
-        final offset = details.focalPoint - _lastFocalPoint;
-        _lastFocalPoint = details.focalPoint;
+  bool _isPointInCanvas(Offset point) {
+    return point.dx >= 0 && 
+           point.dx <= canvasSize.width &&
+           point.dy >= 0 && 
+           point.dy <= canvasSize.height;
+  }
 
-        final matrix = Matrix4.identity();
-        matrix.translate(offset.dx, offset.dy);
-        matrix.scale(_scale);
-        _transformationController.value = matrix;
+  void _handleScaleEnd(ScaleEndDetails details) {
+    if (_isZoomMode) {
+      _lastFocalPoint = null;
+      _isPanning = false;
+    } else if (currentStroke != null) {
+      setState(() {
+        strokes.add(currentStroke!);
+        undoStack.clear();
+        currentStroke = null;
       });
     }
   }
 
-  void _onScaleEnd(ScaleEndDetails details) {
-    _isScaling = false;
+  void _toggleZoomMode() {
+    setState(() {
+      _isZoomMode = !_isZoomMode;
+      if (_isZoomMode) {
+        _scale = 1.5;
+        _transform = Matrix4.identity()
+          ..translate(_offset.dx, _offset.dy, 0.0)
+          ..scale(_scale, _scale, 1.0);
+      }
+    });
   }
 
-  void _resetTransform() {
-    setState(() {
-      _transformationController.value = Matrix4.identity();
-      _scale = 1.0;
-    });
+  Future<void> _saveToPostgreSQL(String imageUrl, String caption) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final token = prefs.getString('token');
+      
+      if (token == null) {
+        _showMessage('Требуется авторизация', isError: true);
+        return;
+      }
+
+      final response = await http.post(
+        Uri.parse('http://localhost:5000/api/posts'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $token',
+        },
+        body: jsonEncode({
+          'title': caption,
+          'description': '',
+          'firebaseImageUrl': imageUrl,
+          'canvasWidth': canvasSize.width.toInt(),
+          'canvasHeight': canvasSize.height.toInt(),
+          'strokeCount': strokes.length,
+        }),
+      );
+
+      if (response.statusCode == 201) {
+        _showMessage('Пост сохранен в базе данных');
+      } else {
+        throw Exception('Failed to save post: ${response.statusCode}');
+      }
+    } catch (e) {
+      debugPrint('Error saving to PostgreSQL: $e');
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     return PopScope(
       canPop: false,
-      onPopInvokedWithResult: (didPop, result) async {
+      onPopInvokedWithResult: (didPop, result) {
         if (didPop) return;
-        final exit = await showDialog<bool>(
-          context: context,
-          builder: (_) => AlertDialog(
-            title: const Text('Выйти?'),
-            content: const Text('Скетч не сохранён. Точно выйти?'),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(context, false),
-                child: const Text('Нет'),
-              ),
-              TextButton(
-                onPressed: () => Navigator.pop(context, true),
-                child: const Text('Да'),
-              ),
-            ],
-          ),
-        );
-        if (exit == true && mounted) {
-          Navigator.of(context).pop();
-        }
+        
+        WidgetsBinding.instance.addPostFrameCallback((_) async {
+          if (!mounted) return;
+          
+          final exit = await showDialog<bool>(
+            context: context,
+            builder: (_) => AlertDialog(
+              title: const Text('Выйти?'),
+              content: const Text('Скетч не сохранён. Точно выйти?'),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context, false),
+                  child: const Text('Нет'),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.pop(context, true),
+                  child: const Text('Да'),
+                ),
+              ],
+            ),
+          );
+          if (exit == true && mounted) {
+            Navigator.of(context).pop();
+          }
+        });
       },
       child: Scaffold(
         backgroundColor: Colors.grey[900],
         appBar: AppBar(
-          backgroundColor: Colors.deepPurple,
-          title: const Text('Новый скетч'),
+          backgroundColor: Colors.transparent,
+          elevation: 0,
+          title: const Text(''),
           automaticallyImplyLeading: false,
-          actions: [
-            IconButton(
-              onPressed: _undo,
-              icon: const Icon(Icons.undo),
-              tooltip: 'Отменить',
-            ),
-            IconButton(
-              onPressed: _redo,
-              icon: const Icon(Icons.redo),
-              tooltip: 'Повторить',
-            ),
-            _toolBtn(Tool.brush, Icons.brush, 'Кисть'),
-            _toolBtn(Tool.pencil, Icons.edit, 'Карандаш'),
-            _toolBtn(Tool.eraser, Icons.auto_fix_high, 'Ластик'),
-            const SizedBox(width: 10),
-            IconButton(
-              onPressed: _resetTransform,
-              icon: const Icon(Icons.zoom_out_map),
-              tooltip: 'Сбросить масштаб',
-            ),
-            IconButton(
-              onPressed: _saveImage,
-              icon: const Icon(Icons.save_alt),
-              tooltip: 'Сохранить',
-            ),
-            IconButton(
-              onPressed: _showPublishDialog,
-              icon: const Icon(Icons.send),
-              tooltip: 'Опубликовать',
-            ),
-          ],
+          centerTitle: true,
+          toolbarHeight: 50,
         ),
         body: Stack(
           children: [
-            // Холст с поддержкой жестов
-            GestureDetector(
-              onScaleStart: _onScaleStart,
-              onScaleUpdate: _onScaleUpdate,
-              onScaleEnd: _onScaleEnd,
-              child: Transform(
-                transform: _transformationController.value,
-                child: Center(
-                  child: Container(
-                    width: canvasSize.width,
-                    height: canvasSize.height,
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(8),
-                      boxShadow: const [
-                        BoxShadow(
-                          color: Colors.black54,
-                          blurRadius: 10,
-                          spreadRadius: 2,
-                        )
-                      ],
-                    ),
-                    child: GestureDetector(
-                      onPanStart: (details) {
-                        if (!_isScaling) {
-                          final offset = details.localPosition;
-                          setState(() {
-                            currentStroke = Stroke(
-                              points: [offset],
-                              color: selectedColor,
-                              width: strokeWidth,
-                              isEraser: tool == Tool.eraser,
-                              toolType: tool,
-                            );
-                          });
-                        }
-                      },
-                      onPanUpdate: (details) {
-                        if (!_isScaling && currentStroke != null) {
-                          final offset = details.localPosition;
-                          setState(() {
-                            currentStroke!.points.add(offset);
-                          });
-                        }
-                      },
-                      onPanEnd: (details) {
-                        if (!_isScaling && currentStroke != null) {
-                          setState(() {
-                            strokes.add(currentStroke!);
-                            undoStack.clear();
-                            currentStroke = null;
-                          });
-                        }
-                      },
+            // ХОЛСТ
+            Positioned.fill(
+              top: 110,
+              bottom: 0,
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onScaleStart: _handleScaleStart,
+                onScaleUpdate: _handleScaleUpdate,
+                onScaleEnd: _handleScaleEnd,
+                child: Transform(
+                  transform: _transform,
+                  child: Center(
+                    child: Container(
+                      key: _canvasContainerKey,
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(8),
+                        boxShadow: const [
+                          BoxShadow(
+                            color: Colors.black54,
+                            blurRadius: 10,
+                            spreadRadius: 2,
+                          )
+                        ],
+                      ),
+                      width: canvasSize.width,
+                      height: canvasSize.height,
                       child: CustomPaint(
-                        size: canvasSize,
                         painter: SketchPainter(
                           strokes: strokes,
                           currentStroke: currentStroke,
@@ -263,54 +336,199 @@ class _DrawPageState extends State<DrawPage> {
               ),
             ),
 
-           
+            // Панель инструментов
             Positioned(
-              top: 10,
-              left: 10,
+              top: 0,
+              left: 0,
+              right: 0,
               child: Container(
-                padding: const EdgeInsets.all(8),
+                height: 110,
                 decoration: BoxDecoration(
-                  color: Colors.black54,
-                  borderRadius: BorderRadius.circular(10),
+                  color: const Color.fromARGB(242, 40, 40, 40),
+                  border: const Border(
+                    bottom: BorderSide(color: Colors.white12, width: 1),
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.5),
+                      blurRadius: 15,
+                      spreadRadius: 5,
+                    ),
+                  ],
                 ),
                 child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      'Инструмент: ${_getToolName(tool)}',
-                      style: const TextStyle(color: Colors.white, fontSize: 12),
+                    SizedBox(
+                      height: 50,
+                      child: Scrollbar(
+                        controller: _toolsScrollController,
+                        thumbVisibility: true,
+                        child: ListView(
+                          controller: _toolsScrollController,
+                          scrollDirection: Axis.horizontal,
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                          children: [
+                            _compactToolBtn(Icons.undo, 'Отменить', _undo),
+                            const SizedBox(width: 8),
+                            _compactToolBtn(Icons.redo, 'Повторить', _redo),
+                            const SizedBox(width: 16),
+                            _compactToolBtnTool(Tool.brush, Icons.brush, 'Кисть'),
+                            const SizedBox(width: 8),
+                            _compactToolBtnTool(Tool.pencil, Icons.edit, 'Карандаш'),
+                            const SizedBox(width: 8),
+                            _compactToolBtnTool(Tool.eraser, Icons.auto_fix_high, 'Ластик'),
+                            const SizedBox(width: 16),
+                            _compactToolBtnZoom(Icons.zoom_in_map, 'Масштаб', _toggleZoomMode),
+                            const SizedBox(width: 16),
+                            _compactToolBtn(Icons.public, 'В ленту', _showPublishDialog),
+                            const SizedBox(width: 8),
+                            _compactToolBtn(Icons.color_lens, 'Палитра', () => setState(() => showPanel = !showPanel)),
+                            const SizedBox(width: 8),
+                            _compactToolBtn(Icons.grid_on, 'Сетка', () {}),
+                            const SizedBox(width: 8),
+                            _compactToolBtn(Icons.layers, 'Слои', () {}),
+                            const SizedBox(width: 8),
+                            _compactToolBtn(Icons.text_fields, 'Текст', () {}),
+                            const SizedBox(width: 8),
+                            _compactToolBtn(Icons.shape_line, 'Фигуры', () {}),
+                          ],
+                        ),
+                      ),
                     ),
-                    const SizedBox(height: 4),
-                    Text(
-                      'Масштаб: ${_scale.toStringAsFixed(1)}x',
-                      style: const TextStyle(color: Colors.white, fontSize: 12),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      'Толщина: ${strokeWidth.round()}',
-                      style: const TextStyle(color: Colors.white, fontSize: 12),
+                    
+                    Container(
+                      height: 60,
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      decoration: const BoxDecoration(
+                        color: Color.fromARGB(230, 30, 30, 30),
+                        border: Border(
+                          top: BorderSide(color: Colors.white12, width: 1),
+                        ),
+                      ),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: ElevatedButton.icon(
+                              onPressed: _saveImage,
+                              icon: const Icon(Icons.save_alt, size: 22),
+                              label: const Text('Сохранить', style: TextStyle(fontSize: 14)),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: Colors.deepPurple,
+                                foregroundColor: Colors.white,
+                                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(25),
+                                ),
+                                elevation: 3,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 20),
+                          
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                            decoration: BoxDecoration(
+                              color: const Color.fromARGB(204, 60, 60, 60),
+                              borderRadius: BorderRadius.circular(20),
+                            ),
+                            child: Row(
+                              children: [
+                                Container(
+                                  width: 24,
+                                  height: 24,
+                                  decoration: BoxDecoration(
+                                    color: selectedColor,
+                                    shape: BoxShape.circle,
+                                    border: Border.all(color: Colors.white, width: 1),
+                                  ),
+                                ),
+                                const SizedBox(width: 12),
+                                Icon(
+                                  _getToolIcon(tool),
+                                  color: Colors.white70,
+                                  size: 18,
+                                ),
+                                const SizedBox(width: 8),
+                                Text(
+                                  '${strokeWidth.round()}',
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Text(
+                                  _getToolName(tool),
+                                  style: const TextStyle(
+                                    color: Colors.white70,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   ],
                 ),
               ),
             ),
 
-            
-            AnimatedPositioned(
-              duration: const Duration(milliseconds: 300),
-              bottom: showPanel ? 0 : -150,
-              left: 0,
-              right: 0,
-              child: Container(
+            if (_isZoomMode)
+              Positioned(
+                top: 120,
+                left: 10,
+                child: Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: const Color.fromARGB(153, 0, 0, 0),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: Colors.white24, width: 1),
+                  ),
+                  child: const Row(
+                    children: [
+                      Icon(Icons.zoom_in_map, color: Colors.yellow, size: 16),
+                      SizedBox(width: 6),
+                      Text(
+                        'Режим панорамирования',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+          ],
+        ),
+
+        bottomSheet: showPanel
+            ? Container(
                 height: 150,
-                decoration: const BoxDecoration(
-                  color: Colors.black87,
-                  borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+                decoration: BoxDecoration(
+                  color: const Color.fromARGB(242, 0, 0, 0),
+                  borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+                  border: Border.all(color: Colors.white24, width: 1),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.5),
+                      blurRadius: 20,
+                      spreadRadius: 5,
+                    ),
+                  ],
                 ),
                 child: Column(
                   children: [
                     GestureDetector(
-                      onTap: () => setState(() => showPanel = !showPanel),
+                      onVerticalDragUpdate: (details) {
+                        if (details.delta.dy > 10) {
+                          setState(() => showPanel = false);
+                        }
+                      },
                       child: Container(
                         margin: const EdgeInsets.only(top: 10),
                         width: 60,
@@ -321,7 +539,7 @@ class _DrawPageState extends State<DrawPage> {
                         ),
                       ),
                     ),
-                    const SizedBox(height: 20),
+                    const SizedBox(height: 15),
                     Expanded(
                       child: ListView(
                         scrollDirection: Axis.horizontal,
@@ -329,7 +547,6 @@ class _DrawPageState extends State<DrawPage> {
                         children: [
                           ...[
                             Colors.black,
-                            Colors.white,
                             Colors.red,
                             Colors.blue,
                             Colors.green,
@@ -340,6 +557,10 @@ class _DrawPageState extends State<DrawPage> {
                             Colors.pink,
                             Colors.cyan,
                             Colors.grey,
+                            Colors.indigo,
+                            Colors.teal,
+                            Colors.amber,
+                            Colors.lightBlue,
                           ].map((color) => Padding(
                             padding: const EdgeInsets.symmetric(horizontal: 4),
                             child: GestureDetector(
@@ -364,6 +585,13 @@ class _DrawPageState extends State<DrawPage> {
                                     ),
                                   ],
                                 ),
+                                child: selectedColor == color
+                                    ? const Icon(
+                                        Icons.check,
+                                        color: Colors.white,
+                                        size: 20,
+                                      )
+                                    : null,
                               ),
                             ),
                           )),
@@ -372,12 +600,16 @@ class _DrawPageState extends State<DrawPage> {
                     ),
                     Padding(
                       padding: const EdgeInsets.symmetric(
-                          horizontal: 30, vertical: 10),
+                          horizontal: 25, vertical: 10),
                       child: Row(
                         children: [
                           const Text(
                             'Толщина:',
-                            style: TextStyle(color: Colors.white),
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 14,
+                              fontWeight: FontWeight.w500,
+                            ),
                           ),
                           const SizedBox(width: 10),
                           Expanded(
@@ -389,43 +621,125 @@ class _DrawPageState extends State<DrawPage> {
                               activeColor: tool == Tool.eraser
                                   ? Colors.red
                                   : Colors.deepPurple,
-                              inactiveColor: Colors.grey,
+                              inactiveColor: Colors.grey[700],
                               onChanged: (value) =>
                                   setState(() => strokeWidth = value),
                             ),
                           ),
-                          Text(
-                            '${strokeWidth.round()}',
-                            style: const TextStyle(color: Colors.white),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 10, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: const Color.fromARGB(179, 103, 58, 183),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Text(
+                              '${strokeWidth.round()}',
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
                           ),
                         ],
                       ),
                     ),
                   ],
                 ),
-              ),
-            ),
+              )
+            : null,
+      ),
+    );
+  }
 
-            
-            Positioned(
-              bottom: 20,
-              left: 0,
-              right: 0,
-              child: Center(
-                child: FloatingActionButton(
-                  backgroundColor: Colors.deepPurple,
-                  onPressed: () => setState(() => showPanel = !showPanel),
-                  child: Icon(
-                    showPanel ? Icons.keyboard_arrow_down : Icons.palette,
-                    color: Colors.white,
-                  ),
-                ),
-              ),
-            ),
-          ],
+  Widget _compactToolBtn(IconData icon, String tooltip, VoidCallback onPressed) {
+    return Tooltip(
+      message: tooltip,
+      child: Material(
+        color: Colors.transparent,
+        borderRadius: BorderRadius.circular(8),
+        child: InkWell(
+          onTap: onPressed,
+          borderRadius: BorderRadius.circular(8),
+          child: Container(
+            padding: const EdgeInsets.all(8),
+            child: Icon(icon, size: 24, color: Colors.white),
+          ),
         ),
       ),
     );
+  }
+
+  Widget _compactToolBtnTool(Tool t, IconData icon, String tooltip) {
+    bool selected = tool == t;
+    Color iconColor;
+    switch (t) {
+      case Tool.brush:
+        iconColor = const Color(0xFF90CAF9);
+        break;
+      case Tool.pencil:
+        iconColor = const Color(0xFFA5D6A7);
+        break;
+      case Tool.eraser:
+        iconColor = const Color(0xFFEF9A9A);
+        break;
+    }
+
+    return Tooltip(
+      message: tooltip,
+      child: Material(
+        color: selected ? Color.fromARGB(51, iconColor.red, iconColor.green, iconColor.blue) : Colors.transparent,
+        borderRadius: BorderRadius.circular(8),
+        child: InkWell(
+          onTap: () {
+            setState(() {
+              tool = t;
+              if (t == Tool.eraser) {
+                strokeWidth = 20.0;
+              } else if (t == Tool.pencil) {
+                strokeWidth = 3.0;
+              } else {
+                strokeWidth = 5.0;
+              }
+            });
+          },
+          borderRadius: BorderRadius.circular(8),
+          child: Container(
+            padding: const EdgeInsets.all(8),
+            child: Icon(icon, size: 24, color: selected ? iconColor : Colors.white),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _compactToolBtnZoom(IconData icon, String tooltip, VoidCallback onPressed) {
+    return Tooltip(
+      message: tooltip,
+      child: Material(
+        color: _isZoomMode ? const Color.fromARGB(51, 255, 255, 0) : Colors.transparent,
+        borderRadius: BorderRadius.circular(8),
+        child: InkWell(
+          onTap: onPressed,
+          borderRadius: BorderRadius.circular(8),
+          child: Container(
+            padding: const EdgeInsets.all(8),
+            child: Icon(_isZoomMode ? Icons.brush : icon, size: 24, color: _isZoomMode ? Colors.yellow : Colors.white),
+          ),
+        ),
+      ),
+    );
+  }
+
+  IconData _getToolIcon(Tool tool) {
+    switch (tool) {
+      case Tool.brush:
+        return Icons.brush;
+      case Tool.pencil:
+        return Icons.edit;
+      case Tool.eraser:
+        return Icons.auto_fix_high;
+    }
   }
 
   String _getToolName(Tool tool) {
@@ -439,61 +753,25 @@ class _DrawPageState extends State<DrawPage> {
     }
   }
 
-  Widget _toolBtn(Tool t, IconData icon, String tooltip) {
-    bool selected = tool == t;
-    Color iconColor;
-    switch (t) {
-      case Tool.brush:
-        iconColor = Colors.blue;
-        break;
-      case Tool.pencil:
-        iconColor = Colors.green;
-        break;
-      case Tool.eraser:
-        iconColor = Colors.red;
-        break;
-    }
-
-    return IconButton(
-      icon: Icon(icon),
-      color: selected ? iconColor : Colors.white,
-      tooltip: tooltip,
-      onPressed: () {
-        setState(() {
-          tool = t;
-          if (t == Tool.eraser) {
-            strokeWidth = 20.0;
-          } else if (t == Tool.pencil) {
-            strokeWidth = 3.0;
-          } else {
-            strokeWidth = 5.0;
-          }
-        });
-      },
-    );
-  }
-
   Future<void> _saveImage() async {
+    if (!mounted) return;
+    
     if (strokes.isEmpty) {
       _showMessage('Нет ничего для сохранения!', isError: true);
       return;
     }
 
     try {
-      
       _showLoadingIndicator();
 
-      
       final recorder = ui.PictureRecorder();
       final canvas = Canvas(recorder);
 
-      
       canvas.drawRect(
         Rect.fromLTWH(0, 0, canvasSize.width, canvasSize.height),
         Paint()..color = Colors.white,
       );
 
-      
       for (final stroke in strokes) {
         final paint = Paint()
           ..color = stroke.isEraser ? Colors.white : stroke.color
@@ -516,24 +794,11 @@ class _DrawPageState extends State<DrawPage> {
         canvasSize.width.toInt(),
         canvasSize.height.toInt(),
       );
-      final byteData =
-          await image.toByteData(format: ui.ImageByteFormat.png);
+      
+      final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
       final bytes = byteData!.buffer.asUint8List();
 
-      
-      final appDir = await getApplicationDocumentsDirectory();
-      final timestamp = DateTime.now().millisecondsSinceEpoch;
-      final fileName = 'sketch_$timestamp.png';
-      final filePath = '${appDir.path}/$fileName';
-      final file = File(filePath);
-      
-      await file.writeAsBytes(bytes);
-
-     
-      _hideLoadingIndicator();
-
-      
-      _showSaveDialog(filePath, fileName);
+      await _saveToGallery(bytes);
 
     } catch (e) {
       _hideLoadingIndicator();
@@ -541,55 +806,164 @@ class _DrawPageState extends State<DrawPage> {
     }
   }
 
-  void _showLoadingIndicator() {
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) => const Center(
-        child: CircularProgressIndicator(),
-      ),
-    );
+  Future<void> _saveToGallery(Uint8List bytes) async {
+    try {
+      String? galleryPath;
+      
+      final possiblePaths = [
+        '/storage/emulated/0/Pictures',
+        '/storage/emulated/0/DCIM',
+        '/sdcard/Pictures',
+        '/sdcard/DCIM',
+      ];
+
+      for (final path in possiblePaths) {
+        final dir = Directory(path);
+        if (await dir.exists()) {
+          galleryPath = path;
+          break;
+        }
+      }
+
+      if (galleryPath == null) {
+        final externalDir = await getExternalStorageDirectory();
+        if (externalDir != null) {
+          galleryPath = externalDir.path;
+        }
+      }
+
+      if (galleryPath == null) {
+        final appDir = await getApplicationDocumentsDirectory();
+        galleryPath = appDir.path;
+      }
+
+      final appGalleryDir = Directory('$galleryPath/SketchShare');
+      if (!await appGalleryDir.exists()) {
+        await appGalleryDir.create(recursive: true);
+      }
+
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final width = canvasSize.width.toInt();
+      final height = canvasSize.height.toInt();
+      final fileName = 'sketch_${width}x${height}_$timestamp.png';
+      final filePath = '${appGalleryDir.path}/$fileName';
+      final file = File(filePath);
+      
+      await file.writeAsBytes(bytes);
+
+      _hideLoadingIndicator();
+      
+      _showSuccessDialog(filePath, fileName, width, height);
+
+    } catch (e) {
+      await _saveToDocuments(bytes);
+    }
   }
 
-  void _hideLoadingIndicator() {
-    Navigator.of(context).pop();
+  Future<void> _saveToDocuments(Uint8List bytes) async {
+    try {
+      final appDir = await getApplicationDocumentsDirectory();
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final width = canvasSize.width.toInt();
+      final height = canvasSize.height.toInt();
+      final fileName = 'sketch_${width}x${height}_$timestamp.png';
+      final filePath = '${appDir.path}/$fileName';
+      final file = File(filePath);
+      
+      await file.writeAsBytes(bytes);
+
+      _hideLoadingIndicator();
+      
+      _showSaveDialog(filePath, fileName, 'память приложения', width, height);
+
+    } catch (e) {
+      _hideLoadingIndicator();
+      _showMessage('Не удалось сохранить: $e', isError: true);
+    }
   }
 
-  void _showMessage(String message, {bool isError = false}) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message),
-        backgroundColor: isError ? Colors.red : Colors.green,
-        duration: const Duration(seconds: 3),
-      ),
-    );
-  }
-
-  void _showSaveDialog(String filePath, String fileName) {
+  void _showSuccessDialog(String filePath, String fileName, int width, int height) {
+    if (!mounted) return;
+    
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Сохранено успешно!'),
+        title: const Row(
+          children: [
+            Icon(Icons.check_circle, color: Colors.green),
+            SizedBox(width: 10),
+            Text('Сохранено!'),
+          ],
+        ),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('Рисунок сохранен в памяти приложения.'),
-            const SizedBox(height: 10),
-            Text(
-              'Файл: $fileName',
+            const Text('Рисунок сохранен в галерее.'),
+            const SizedBox(height: 12),
+            _buildInfoRow('Размер:', '${width}x$height пикселей'),
+            _buildInfoRow('Файл:', fileName),
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.green[50],
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: const Text(
+                'Найдите файл в папке "SketchShare" в галерее устройства.',
+                style: TextStyle(fontSize: 12),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Отлично!'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildInfoRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '$label ',
+            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+          ),
+          Expanded(
+            child: Text(
+              value,
               style: const TextStyle(fontSize: 12, color: Colors.grey),
+              overflow: TextOverflow.ellipsis,
             ),
-            const SizedBox(height: 5),
-            Text(
-              'Путь: ${filePath.split('/').sublist(0, 3).join('/')}/.../${filePath.split('/').last}',
-              style: const TextStyle(fontSize: 10, color: Colors.grey),
-            ),
-            const SizedBox(height: 15),
-            const Text(
-              'Чтобы получить доступ к файлу, воспользуйтесь файловым менеджером устройства.',
-              style: TextStyle(fontSize: 12),
-            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showSaveDialog(String filePath, String fileName, String location, int width, int height) {
+    if (!mounted) return;
+    
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Сохранено'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Рисунок сохранен в $location.'),
+            const SizedBox(height: 10),
+            _buildInfoRow('Размер:', '${width}x$height пикселей'),
+            _buildInfoRow('Файл:', fileName),
           ],
         ),
         actions: [
@@ -602,7 +976,43 @@ class _DrawPageState extends State<DrawPage> {
     );
   }
 
+  void _showLoadingIndicator() {
+    if (!mounted) return;
+    
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => const Center(
+        child: CircularProgressIndicator(color: Colors.deepPurple),
+      ),
+    );
+  }
+
+  void _hideLoadingIndicator() {
+    if (mounted) {
+      Navigator.of(context, rootNavigator: true).pop();
+    }
+  }
+
+  void _showMessage(String message, {bool isError = false}) {
+    if (!mounted) return;
+    
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: isError ? Colors.red : Colors.green,
+        duration: const Duration(seconds: 3),
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(10),
+        ),
+      ),
+    );
+  }
+
   Future<void> _showPublishDialog() async {
+    if (!mounted) return;
+    
     if (strokes.isEmpty) {
       _showMessage('Нет ничего для публикации!', isError: true);
       return;
@@ -658,6 +1068,7 @@ class _DrawPageState extends State<DrawPage> {
     try {
       _showLoadingIndicator();
 
+      // 1. Создаем изображение
       final recorder = ui.PictureRecorder();
       final canvas = Canvas(recorder);
 
@@ -688,35 +1099,40 @@ class _DrawPageState extends State<DrawPage> {
         canvasSize.width.toInt(),
         canvasSize.height.toInt(),
       );
-      final byteData =
-          await image.toByteData(format: ui.ImageByteFormat.png);
+      final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
       final bytes = byteData!.buffer.asUint8List();
 
-      final ref = FirebaseStorage.instance.ref().child(
-          'sketches/${DateTime.now().millisecondsSinceEpoch}.png');
-      await ref.putData(bytes);
-      final url = await ref.getDownloadURL();
-
-      await FirebaseFirestore.instance.collection('sketches').add({
-        'imageUrl': url,
-        'caption': caption,
-        'authorName': FirebaseAuth.instance.currentUser?.displayName ?? 'Аноним',
-        'authorId': FirebaseAuth.instance.currentUser?.uid,
-        'canvasSize': {'width': canvasSize.width, 'height': canvasSize.height},
-        'timestamp': FieldValue.serverTimestamp(),
-        'toolCount': strokes.length,
-      });
-
-      _hideLoadingIndicator();
-      _showMessage('Успешно опубликовано!');
+      // 2. Сохраняем в Firebase Storage
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final fileName = 'sketches/sketch_$timestamp.png';
+      final ref = FirebaseStorage.instance.ref().child(fileName);
       
-      // Задержка перед возвратом
+      final metadata = SettableMetadata(
+        contentType: 'image/png',
+        customMetadata: {
+          'author': FirebaseAuth.instance.currentUser?.uid ?? 'anonymous',
+        },
+      );
+      
+      await ref.putData(bytes, metadata);
+      final imageUrl = await ref.getDownloadURL();
+
+      // 3. Сохраняем в PostgreSQL
+      await _saveToPostgreSQL(imageUrl, caption);
+
+      // 4. Показываем успех
+      _hideLoadingIndicator();
+      _showMessage('Успешно опубликовано в ленту!');
+      
       await Future.delayed(const Duration(seconds: 2));
-      Navigator.of(context).pop();
+      if (mounted) {
+        Navigator.of(context).pop();
+      }
 
     } catch (e) {
       _hideLoadingIndicator();
       _showMessage('Ошибка публикации: $e', isError: true);
+      debugPrint('Publish error details: $e');
     }
   }
 }
@@ -747,36 +1163,33 @@ class SketchPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    
     canvas.drawRect(
       Rect.fromLTWH(0, 0, size.width, size.height),
       Paint()..color = Colors.white,
     );
 
-    final all = [...strokes];
-    if (currentStroke != null) all.add(currentStroke!);
+    final allStrokes = [...strokes];
+    if (currentStroke != null) {
+      allStrokes.add(currentStroke!);
+    }
 
-    for (final stroke in all) {
+    for (final stroke in allStrokes) {
       if (stroke.points.length < 2) continue;
 
       final paint = Paint()
         ..strokeCap = StrokeCap.round
         ..strokeJoin = StrokeJoin.round
         ..strokeWidth = stroke.width
-        ..style = PaintingStyle.stroke;
-
-      if (stroke.isEraser) {
-        
-        paint.color = Colors.white;
-      } else {
-        paint.color = stroke.color;
-      }
+        ..style = PaintingStyle.stroke
+        ..color = stroke.isEraser ? Colors.white : stroke.color;
 
       final path = Path();
       path.moveTo(stroke.points[0].dx, stroke.points[0].dy);
+      
       for (int i = 1; i < stroke.points.length; i++) {
         path.lineTo(stroke.points[i].dx, stroke.points[i].dy);
       }
+      
       canvas.drawPath(path, paint);
     }
   }

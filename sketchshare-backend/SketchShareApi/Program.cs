@@ -10,7 +10,7 @@ builder.Services.AddControllers();
 
 var app = builder.Build();
 
-app.UseStaticFiles(); // ← ЭТО ВАЖНО! Для отдачи аватарок
+app.UseStaticFiles(); 
 app.UseHttpsRedirection();
 app.MapControllers();
 
