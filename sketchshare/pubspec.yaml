@@ -1,5 +1,5 @@
 name: sketchshare
-description: "A new Flutter project."
+description: "SketchShare Drawing App"
 publish_to: 'none'
 version: 1.0.0+1
 
@@ -9,17 +9,34 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+    
 
-  
-  firebase_core: ^2.24.0
-  firebase_auth: ^4.15.3   
+
+  # Firebase для авторизации
   cloud_firestore: ^4.15.3
-  firebase_storage: ^11.5.0
+  firebase_storage: ^11.3.6
+  firebase_core: ^2.32.0
+  firebase_auth: ^4.18.1
   
 
+  
+  # Ваш .NET API
+  http: ^1.1.0
+  
+  # UI и изображения
+  cached_network_image: ^3.3.0
+  shimmer: ^3.0.0
+  intl: ^0.19.0
+  cupertino_icons: ^1.0.2
+  
+  # Состояние и локальное хранение
+  provider: ^6.1.1
+  shared_preferences: ^2.2.2
+  
+  # Работа с файлами
   image_picker: ^1.1.2
   path_provider: ^2.1.3
-  shared_preferences: ^2.2.2
+
 
 dev_dependencies:
   flutter_test:
@@ -28,4 +45,6 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
- 
+
+assets:
+  - assets/images/

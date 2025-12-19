@@ -1,99 +1,185 @@
-// Controllers/PostsController.cs
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using SketchShareApi.Data;
+using SketchShareApi.DTOs;
 using SketchShareApi.Models;
-using Microsoft.AspNetCore.Authorization;
+using System.Drawing;
+
+namespace SketchShareApi.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
 public class PostsController : ControllerBase
 {
     private readonly AppDbContext _context;
+    private readonly ILogger<PostsController> _logger;
 
-    public PostsController(AppDbContext context)
+    public PostsController(AppDbContext context, ILogger<PostsController> logger)
     {
         _context = context;
+        _logger = logger;
     }
 
     // GET: api/posts
     [HttpGet]
-    public async Task<ActionResult<IEnumerable<Post>>> GetPosts(
+    [AllowAnonymous]
+    public async Task<ActionResult<IEnumerable<PostResponseDto>>> GetPosts(
         [FromQuery] int page = 1,
         [FromQuery] int pageSize = 20,
         [FromQuery] string? sortBy = "newest")
     {
-        IQueryable<Post> query = _context.Posts
-            .Where(p => !p.IsDeleted)
-            .Include(p => p.User)
-            .Include(p => p.Likes);
-
-        // Сортировка
-        query = sortBy switch
+        try
         {
-            "popular" => query.OrderByDescending(p => p.LikeCount),
-            "views" => query.OrderByDescending(p => p.ViewCount),
-            _ => query.OrderByDescending(p => p.CreatedAt) // newest
-        };
+            IQueryable<Post> query = _context.Posts
+                .Where(p => !p.IsDeleted)
+                .Include(p => p.User)
+                .Include(p => p.Likes);
 
-        var totalCount = await query.CountAsync();
-        var posts = await query
-            .Skip((page - 1) * pageSize)
-            .Take(pageSize)
-            .ToListAsync();
+            query = sortBy?.ToLower() switch
+            {
+                "popular" => query.OrderByDescending(p => p.LikeCount),
+                "views" => query.OrderByDescending(p => p.ViewCount),
+                "oldest" => query.OrderBy(p => p.CreatedAt),
+                _ => query.OrderByDescending(p => p.CreatedAt)
+            };
 
-        Response.Headers.Append("X-Total-Count", totalCount.ToString());
-        Response.Headers.Append("X-Total-Pages", Math.Ceiling(totalCount / (double)pageSize).ToString());
+            var totalCount = await query.CountAsync();
+            var posts = await query
+                .Skip((page - 1) * pageSize)
+                .Take(pageSize)
+                .ToListAsync();
 
-        return posts;
+            var currentUserId = GetCurrentUserId();
+            var response = posts.Select(p => MapToDto(p, currentUserId)).ToList();
+
+            Response.Headers.Append("X-Total-Count", totalCount.ToString());
+            Response.Headers.Append("X-Total-Pages", Math.Ceiling(totalCount / (double)pageSize).ToString());
+
+            return Ok(response);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting posts");
+            return StatusCode(500, "Internal server error");
+        }
     }
 
     // GET: api/posts/5
     [HttpGet("{id}")]
-    public async Task<ActionResult<Post>> GetPost(int id)
+    [AllowAnonymous]
+    public async Task<ActionResult<PostResponseDto>> GetPost(int id)
     {
-        var post = await _context.Posts
-            .Include(p => p.User)
-            .Include(p => p.Likes)
-            .ThenInclude(c => c.User)
-            .FirstOrDefaultAsync(p => p.Id == id && !p.IsDeleted);
+        try
+        {
+            var post = await _context.Posts
+                .Include(p => p.User)
+                .Include(p => p.Likes)
+                .FirstOrDefaultAsync(p => p.Id == id && !p.IsDeleted);
 
-        if (post == null)
-            return NotFound();
+            if (post == null)
+                return NotFound();
 
-        // Увеличиваем счетчик просмотров
-        post.ViewCount++;
-        await _context.SaveChangesAsync();
+            post.ViewCount++;
+            await _context.SaveChangesAsync();
 
-        return post;
+            var currentUserId = GetCurrentUserId();
+            return Ok(MapToDto(post, currentUserId));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, $"Error getting post {id}");
+            return StatusCode(500, "Internal server error");
+        }
+    }
+
+    // GET: api/posts/5/image
+    [HttpGet("{id}/image")]
+    [AllowAnonymous]
+    public async Task<IActionResult> GetPostImage(int id)
+    {
+        try
+        {
+            var post = await _context.Posts.FindAsync(id);
+            if (post == null || post.IsDeleted || post.ImageData == null || post.ImageData.Length == 0)
+                return NotFound();
+
+            return File(post.ImageData, post.ImageContentType);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, $"Error getting image for post {id}");
+            return StatusCode(500, "Internal server error");
+        }
     }
 
     // POST: api/posts
     [Authorize]
     [HttpPost]
-    public async Task<ActionResult<Post>> CreatePost(PostCreateDto postDto)
+    [Consumes("multipart/form-data")]
+    public async Task<ActionResult<PostResponseDto>> CreatePost([FromForm] PostCreateDto postDto)
     {
-        // Проверяем userId из токена
-        var userIdClaim = User.FindFirst("userId")?.Value;
-        if (string.IsNullOrEmpty(userIdClaim) || !int.TryParse(userIdClaim, out var userId))
-            return Unauthorized();
-
-        var post = new Post
+        try
         {
-            Title = postDto.Title,
-            Description = postDto.Description,
-            UserId = userId,
-            FirebaseImageUrl = postDto.FirebaseImageUrl,
-            CanvasWidth = postDto.CanvasWidth,
-            CanvasHeight = postDto.CanvasHeight,
-            StrokeCount = postDto.StrokeCount,
-            CreatedAt = DateTime.UtcNow
-        };
+            var userId = GetCurrentUserId();
+            if (userId == 0)
+                return Unauthorized();
 
-        _context.Posts.Add(post);
-        await _context.SaveChangesAsync();
+            var user = await _context.Users.FindAsync(userId);
+            if (user == null)
+                return Unauthorized("User not found");
 
-        return CreatedAtAction(nameof(GetPost), new { id = post.Id }, post);
+            // Валидация файла
+            if (postDto.ImageFile == null || postDto.ImageFile.Length == 0)
+                return BadRequest("Image file is required");
+
+            if (postDto.ImageFile.Length > 10 * 1024 * 1024) // 10MB
+                return BadRequest("File size exceeds 10MB limit");
+
+            var allowedExtensions = new[] { ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp" };
+            var fileExtension = Path.GetExtension(postDto.ImageFile.FileName).ToLower();
+            
+            if (!allowedExtensions.Contains(fileExtension))
+                return BadRequest($"Invalid file format. Allowed: {string.Join(", ", allowedExtensions)}");
+
+            // Читаем файл в массив байтов
+            byte[] imageData;
+            using (var memoryStream = new MemoryStream())
+            {
+                await postDto.ImageFile.CopyToAsync(memoryStream);
+                imageData = memoryStream.ToArray();
+            }
+
+            // Определяем ContentType
+            var contentType = GetContentType(fileExtension);
+
+            // Создаем пост
+            var post = new Post
+            {
+                Title = postDto.Title.Trim(),
+                Description = postDto.Description?.Trim() ?? string.Empty,
+                UserId = userId,
+                ImageData = imageData,
+                ImageContentType = contentType,
+                ImageFileName = postDto.ImageFile.FileName,
+                CanvasWidth = postDto.CanvasWidth,
+                CanvasHeight = postDto.CanvasHeight,
+                FileSize = postDto.ImageFile.Length,
+                StrokeCount = postDto.StrokeCount,
+                CreatedAt = DateTime.UtcNow
+            };
+
+            _context.Posts.Add(post);
+            await _context.SaveChangesAsync();
+
+            var response = MapToDto(post, userId);
+            return CreatedAtAction(nameof(GetPost), new { id = post.Id }, response);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error creating post");
+            return StatusCode(500, "Internal server error");
+        }
     }
 
     // PUT: api/posts/5/like
@@ -101,38 +187,44 @@ public class PostsController : ControllerBase
     [HttpPut("{id}/like")]
     public async Task<ActionResult> ToggleLike(int id)
     {
-        var userIdClaim = User.FindFirst("userId")?.Value;
-        if (string.IsNullOrEmpty(userIdClaim) || !int.TryParse(userIdClaim, out var userId))
-            return Unauthorized();
-
-        var post = await _context.Posts.FindAsync(id);
-        if (post == null || post.IsDeleted)
-            return NotFound();
-
-        var existingLike = await _context.Likes
-            .FirstOrDefaultAsync(l => l.Post_Id == id && l.User_Id == userId);
-
-        if (existingLike != null)
+        try
         {
-            // Удаляем лайк
-            _context.Likes.Remove(existingLike);
-            post.LikeCount--;
-        }
-        else
-        {
-            // Добавляем лайк
-            var like = new Like
+            var userId = GetCurrentUserId();
+            if (userId == 0)
+                return Unauthorized();
+
+            var post = await _context.Posts.FindAsync(id);
+            if (post == null || post.IsDeleted)
+                return NotFound();
+
+            var existingLike = await _context.Likes
+                .FirstOrDefaultAsync(l => l.Post_Id == id && l.User_Id == userId);
+
+            if (existingLike != null)
             {
-                Post_Id = id,
-                User_Id = userId,
-                CreatedAt = DateTime.UtcNow
-            };
-            _context.Likes.Add(like);
-            post.LikeCount++;
-        }
+                _context.Likes.Remove(existingLike);
+                post.LikeCount = Math.Max(0, post.LikeCount - 1);
+            }
+            else
+            {
+                var like = new Like
+                {
+                    Post_Id = id,
+                    User_Id = userId,
+                    CreatedAt = DateTime.UtcNow
+                };
+                _context.Likes.Add(like);
+                post.LikeCount++;
+            }
 
-        await _context.SaveChangesAsync();
-        return Ok(new { likeCount = post.LikeCount });
+            await _context.SaveChangesAsync();
+            return Ok(new { likeCount = post.LikeCount });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, $"Error toggling like for post {id}");
+            return StatusCode(500, "Internal server error");
+        }
     }
 
     // DELETE: api/posts/5
@@ -140,48 +232,89 @@ public class PostsController : ControllerBase
     [HttpDelete("{id}")]
     public async Task<IActionResult> DeletePost(int id, [FromBody] DeletePostDto deleteDto)
     {
+        try
+        {
+            var userId = GetCurrentUserId();
+            var post = await _context.Posts.FindAsync(id);
+
+            if (post == null)
+                return NotFound();
+
+            var isAdmin = User.IsInRole("Admin");
+            if (post.UserId != userId && !isAdmin)
+                return Forbid();
+
+            if (isAdmin)
+            {
+                post.IsDeleted = true;
+                post.DeleteReason = deleteDto.Reason?.Trim();
+                post.UpdatedAt = DateTime.UtcNow;
+            }
+            else
+            {
+                var likes = await _context.Likes.Where(l => l.Post_Id == id).ToListAsync();
+                _context.Likes.RemoveRange(likes);
+                _context.Posts.Remove(post);
+            }
+
+            await _context.SaveChangesAsync();
+            return NoContent();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, $"Error deleting post {id}");
+            return StatusCode(500, "Internal server error");
+        }
+    }
+
+    // Вспомогательные методы
+    private int GetCurrentUserId()
+    {
         var userIdClaim = User.FindFirst("userId")?.Value;
         if (string.IsNullOrEmpty(userIdClaim) || !int.TryParse(userIdClaim, out var userId))
-            return Unauthorized();
-
-        var post = await _context.Posts.FindAsync(id);
-        if (post == null)
-            return NotFound();
-
-        // Проверяем права (только автор или админ)
-        var isAdmin = User.IsInRole("Admin");
-        if (post.UserId != userId && !isAdmin)
-            return Forbid();
-
-        if (isAdmin)
-        {
-            // Админ скрывает пост
-            post.IsDeleted = true;
-            post.DeleteReason = deleteDto.Reason;
-        }
-        else
-        {
-            // Автор полностью удаляет
-            _context.Posts.Remove(post);
-        }
-
-        await _context.SaveChangesAsync();
-        return NoContent();
+            return 0;
+        return userId;
     }
-}
 
-// DTOs
-public class PostCreateDto
-{
-    public string Title { get; set; } = string.Empty;
-    public string Description { get; set; } = string.Empty;
-    public string FirebaseImageUrl { get; set; } = string.Empty;
-    public int CanvasWidth { get; set; }
-    public int CanvasHeight { get; set; }
-    public int StrokeCount { get; set; }
-}
+    private string GetContentType(string fileExtension)
+    {
+        return fileExtension switch
+        {
+            ".png" => "image/png",
+            ".jpg" or ".jpeg" => "image/jpeg",
+            ".gif" => "image/gif",
+            ".webp" => "image/webp",
+            ".bmp" => "image/bmp",
+            ".svg" => "image/svg+xml",
+            _ => "application/octet-stream"
+        };
+    }
 
-public class DeletePostDto
-{
-    public string Reason { get; set; } = string.Empty;
+    private PostResponseDto MapToDto(Post post, int currentUserId)
+    {
+        return new PostResponseDto
+        {
+            Id = post.Id,
+            Title = post.Title,
+            Description = post.Description,
+            ImageUrl = $"/api/posts/{post.Id}/image",
+            CanvasWidth = post.CanvasWidth,
+            CanvasHeight = post.CanvasHeight,
+            FileSize = post.FileSize,
+            StrokeCount = post.StrokeCount,
+            LikeCount = post.LikeCount,
+            ViewCount = post.ViewCount,
+            CreatedAt = post.CreatedAt,
+            ContentType = post.ImageContentType,
+            User = new UserResponseDto
+            {
+                Id = post.User.Id_User,
+                Name = post.User.Name,
+                Surname = post.User.Surname,
+                Nickname = post.User.Nickname,
+                Avatar = post.User.Avatar.ToString()
+            },
+            IsLiked = currentUserId > 0 && post.Likes.Any(l => l.User_Id == currentUserId)
+        };
+    }
 }

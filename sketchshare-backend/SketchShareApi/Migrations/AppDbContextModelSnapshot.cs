@@ -17,7 +17,7 @@ namespace SketchShareApi.Migrations
         {
 #pragma warning disable 612, 618
             modelBuilder
-                .HasAnnotation("ProductVersion", "8.0.8")
+                .HasAnnotation("ProductVersion", "9.0.0")
                 .HasAnnotation("Relational:MaxIdentifierLength", 63);
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
@@ -42,8 +42,6 @@ namespace SketchShareApi.Migrations
                         .HasColumnType("integer");
 
                     b.HasKey("Id");
-
-                    b.HasIndex("Post_Id");
 
                     b.HasIndex("User_Id");
 
@@ -77,11 +75,29 @@ namespace SketchShareApi.Migrations
 
                     b.Property<string>("Description")
                         .IsRequired()
-                        .HasColumnType("text");
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
 
-                    b.Property<string>("FirebaseImageUrl")
+                    b.Property<long>("FileSize")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("ImageContentType")
                         .IsRequired()
                         .HasColumnType("text");
+
+                    b.Property<byte[]>("ImageData")
+                        .IsRequired()
+                        .HasColumnType("bytea");
+
+                    b.Property<string>("ImageFileName")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<int>("ImageHeight")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("ImageWidth")
+                        .HasColumnType("integer");
 
                     b.Property<bool>("IsDeleted")
                         .HasColumnType("boolean");
@@ -92,9 +108,13 @@ namespace SketchShareApi.Migrations
                     b.Property<int>("StrokeCount")
                         .HasColumnType("integer");
 
+                    b.Property<byte[]>("ThumbnailData")
+                        .HasColumnType("bytea");
+
                     b.Property<string>("Title")
                         .IsRequired()
-                        .HasColumnType("text");
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
 
                     b.Property<DateTime?>("UpdatedAt")
                         .HasColumnType("timestamp with time zone");
@@ -106,10 +126,6 @@ namespace SketchShareApi.Migrations
                         .HasColumnType("integer");
 
                     b.HasKey("Id");
-
-                    b.HasIndex("CreatedAt");
-
-                    b.HasIndex("LikeCount");
 
                     b.HasIndex("UserId");
 
@@ -130,7 +146,7 @@ namespace SketchShareApi.Migrations
 
                     b.HasKey("Id");
 
-                    b.ToTable("Role");
+                    b.ToTable("Roles");
                 });
 
             modelBuilder.Entity("SketchShareApi.Models.User", b =>

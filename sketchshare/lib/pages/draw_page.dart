@@ -6,9 +6,6 @@ import 'package:path_provider/path_provider.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:http/http.dart' as http;
-import 'dart:convert';
-import 'package:shared_preferences/shared_preferences.dart';
 
 class DrawPage extends StatefulWidget {
   const DrawPage({super.key});
@@ -26,7 +23,10 @@ class _DrawPageState extends State<DrawPage> {
   bool showPanel = false;
   bool _isZoomMode = false;
   
+  // Ключ для получения позиции контейнера холста
   final GlobalKey _canvasContainerKey = GlobalKey();
+  
+  // Фиксированная панель инструментов
   final ScrollController _toolsScrollController = ScrollController();
 
   final Map<String, Size> canvasSizes = {
@@ -37,8 +37,10 @@ class _DrawPageState extends State<DrawPage> {
   };
   late Size canvasSize;
 
+  // Для плавного масштабирования
   Matrix4 _transform = Matrix4.identity();
   double _scale = 1.0;
+  double _lastScale = 1.0;
   Offset _offset = Offset.zero;
   Offset? _lastFocalPoint;
   bool _isPanning = false;
@@ -78,9 +80,7 @@ class _DrawPageState extends State<DrawPage> {
     if (selected != null && canvasSizes[selected] != null) {
       setState(() {
         canvasSize = canvasSizes[selected]!;
-        _transform = Matrix4.identity();
-        _scale = 1.0;
-        _offset = Offset.zero;
+        _resetZoom();
       });
     }
   }
@@ -103,20 +103,19 @@ class _DrawPageState extends State<DrawPage> {
 
   void _handleScaleStart(ScaleStartDetails details) {
     if (_isZoomMode) {
+      // РЕЖИМ МАСШТАБИРОВАНИЯ: запоминаем начальную точку
       _lastFocalPoint = details.localFocalPoint;
+      _lastScale = _scale;
       _isPanning = true;
     } else {
+      // РЕЖИМ РИСОВАНИЯ: начинаем рисовать
       try {
         final renderBox = _canvasContainerKey.currentContext?.findRenderObject() as RenderBox?;
         if (renderBox == null) return;
         
         final localPoint = renderBox.globalToLocal(details.focalPoint);
-        
         final inverseMatrix = Matrix4.inverted(_transform);
-        final transformedPoint = MatrixUtils.transformPoint(
-          inverseMatrix, 
-          localPoint
-        );
+        final transformedPoint = MatrixUtils.transformPoint(inverseMatrix, localPoint);
         
         if (_isPointInCanvas(transformedPoint)) {
           setState(() {
@@ -137,29 +136,34 @@ class _DrawPageState extends State<DrawPage> {
 
   void _handleScaleUpdate(ScaleUpdateDetails details) {
     if (_isZoomMode && _isPanning) {
+      // ПЛАВНОЕ МАСШТАБИРОВАНИЕ ДВУМЯ ПАЛЬЦАМИ + ПАНОРАМИРОВАНИЕ
       setState(() {
-        if (_lastFocalPoint != null) {
-          final delta = details.localFocalPoint - _lastFocalPoint!;
+        // Масштабирование
+        if (details.scale != 1.0) {
+          _scale = (_lastScale * details.scale).clamp(0.5, 5.0); // Ограничиваем масштаб
+        }
+        
+        // Панорамирование
+        if (_lastFocalPoint != null && details.focalPointDelta != Offset.zero) {
+          final delta = details.focalPointDelta;
           _offset += delta;
           _lastFocalPoint = details.localFocalPoint;
-          
-          _transform = Matrix4.identity()
-            ..translate(_offset.dx, _offset.dy, 0.0)
-            ..scale(_scale, _scale, 1.0);
         }
+        
+        // Обновляем трансформацию с плавностью
+        _transform = Matrix4.identity()
+          ..translate(_offset.dx, _offset.dy, 0.0)
+          ..scale(_scale, _scale, 1.0);
       });
     } else if (!_isZoomMode && currentStroke != null) {
+      // Режим рисования - продолжение линии
       try {
         final renderBox = _canvasContainerKey.currentContext?.findRenderObject() as RenderBox?;
         if (renderBox == null) return;
         
         final localPoint = renderBox.globalToLocal(details.focalPoint);
-        
         final inverseMatrix = Matrix4.inverted(_transform);
-        final transformedPoint = MatrixUtils.transformPoint(
-          inverseMatrix, 
-          localPoint
-        );
+        final transformedPoint = MatrixUtils.transformPoint(inverseMatrix, localPoint);
         
         if (_isPointInCanvas(transformedPoint)) {
           setState(() {
@@ -194,8 +198,23 @@ class _DrawPageState extends State<DrawPage> {
 
   void _handleScaleEnd(ScaleEndDetails details) {
     if (_isZoomMode) {
+      // Сохраняем текущие значения для следующего жеста
       _lastFocalPoint = null;
+      _lastScale = _scale;
       _isPanning = false;
+      
+      // Плавная фиксация позиции (добавляем инерцию)
+      if (details.velocity.pixelsPerSecond.distanceSquared > 100) {
+        final velocity = details.velocity.pixelsPerSecond;
+        final offsetDelta = velocity * 0.02; // Множитель инерции
+        
+        setState(() {
+          _offset += offsetDelta;
+          _transform = Matrix4.identity()
+            ..translate(_offset.dx, _offset.dy, 0.0)
+            ..scale(_scale, _scale, 1.0);
+        });
+      }
     } else if (currentStroke != null) {
       setState(() {
         strokes.add(currentStroke!);
@@ -209,7 +228,8 @@ class _DrawPageState extends State<DrawPage> {
     setState(() {
       _isZoomMode = !_isZoomMode;
       if (_isZoomMode) {
-        _scale = 1.5;
+        // При входе в режим масштабирования - немного увеличиваем
+        _scale = _scale == 1.0 ? 1.5 : _scale;
         _transform = Matrix4.identity()
           ..translate(_offset.dx, _offset.dy, 0.0)
           ..scale(_scale, _scale, 1.0);
@@ -217,441 +237,421 @@ class _DrawPageState extends State<DrawPage> {
     });
   }
 
-  Future<void> _saveToPostgreSQL(String imageUrl, String caption) async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final token = prefs.getString('token');
-      
-      if (token == null) {
-        _showMessage('Требуется авторизация', isError: true);
-        return;
-      }
-
-      final response = await http.post(
-        Uri.parse('http://localhost:5000/api/posts'),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $token',
-        },
-        body: jsonEncode({
-          'title': caption,
-          'description': '',
-          'firebaseImageUrl': imageUrl,
-          'canvasWidth': canvasSize.width.toInt(),
-          'canvasHeight': canvasSize.height.toInt(),
-          'strokeCount': strokes.length,
-        }),
-      );
-
-      if (response.statusCode == 201) {
-        _showMessage('Пост сохранен в базе данных');
-      } else {
-        throw Exception('Failed to save post: ${response.statusCode}');
-      }
-    } catch (e) {
-      debugPrint('Error saving to PostgreSQL: $e');
-    }
+  void _resetZoom() {
+    setState(() {
+      _scale = 1.0;
+      _offset = Offset.zero;
+      _transform = Matrix4.identity();
+      _lastScale = 1.0;
+      _lastFocalPoint = null;
+    });
   }
 
   @override
   Widget build(BuildContext context) {
-    return PopScope(
-      canPop: false,
-      onPopInvokedWithResult: (didPop, result) {
-        if (didPop) return;
-        
-        WidgetsBinding.instance.addPostFrameCallback((_) async {
-          if (!mounted) return;
+    return SafeArea(
+      child: PopScope(
+        canPop: false,
+        onPopInvokedWithResult: (didPop, result) {
+          if (didPop) return;
           
-          final exit = await showDialog<bool>(
-            context: context,
-            builder: (_) => AlertDialog(
-              title: const Text('Выйти?'),
-              content: const Text('Скетч не сохранён. Точно выйти?'),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(context, false),
-                  child: const Text('Нет'),
-                ),
-                TextButton(
-                  onPressed: () => Navigator.pop(context, true),
-                  child: const Text('Да'),
-                ),
-              ],
-            ),
-          );
-          if (exit == true && mounted) {
-            Navigator.of(context).pop();
-          }
-        });
-      },
-      child: Scaffold(
-        backgroundColor: Colors.grey[900],
-        appBar: AppBar(
-          backgroundColor: Colors.transparent,
-          elevation: 0,
-          title: const Text(''),
-          automaticallyImplyLeading: false,
-          centerTitle: true,
-          toolbarHeight: 50,
-        ),
-        body: Stack(
-          children: [
-            // ХОЛСТ
-            Positioned.fill(
-              top: 110,
-              bottom: 0,
-              child: GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onScaleStart: _handleScaleStart,
-                onScaleUpdate: _handleScaleUpdate,
-                onScaleEnd: _handleScaleEnd,
-                child: Transform(
-                  transform: _transform,
-                  child: Center(
-                    child: Container(
-                      key: _canvasContainerKey,
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(8),
-                        boxShadow: const [
-                          BoxShadow(
-                            color: Colors.black54,
-                            blurRadius: 10,
-                            spreadRadius: 2,
-                          )
-                        ],
-                      ),
-                      width: canvasSize.width,
-                      height: canvasSize.height,
-                      child: CustomPaint(
-                        painter: SketchPainter(
-                          strokes: strokes,
-                          currentStroke: currentStroke,
-                        ),
-                      ),
-                    ),
+          WidgetsBinding.instance.addPostFrameCallback((_) async {
+            if (!mounted) return;
+            
+            final exit = await showDialog<bool>(
+              context: context,
+              builder: (_) => AlertDialog(
+                title: const Text('Выйти?'),
+                content: const Text('Скетч не сохранён. Точно выйти?'),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(context, false),
+                    child: const Text('Нет'),
                   ),
-                ),
+                  TextButton(
+                    onPressed: () => Navigator.pop(context, true),
+                    child: const Text('Да'),
+                  ),
+                ],
               ),
-            ),
-
-            // Панель инструментов
-            Positioned(
-              top: 0,
-              left: 0,
-              right: 0,
-              child: Container(
-                height: 110,
-                decoration: BoxDecoration(
-                  color: const Color.fromARGB(242, 40, 40, 40),
-                  border: const Border(
-                    bottom: BorderSide(color: Colors.white12, width: 1),
-                  ),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withOpacity(0.5),
-                      blurRadius: 15,
-                      spreadRadius: 5,
-                    ),
-                  ],
-                ),
-                child: Column(
-                  children: [
-                    SizedBox(
-                      height: 50,
-                      child: Scrollbar(
-                        controller: _toolsScrollController,
-                        thumbVisibility: true,
-                        child: ListView(
-                          controller: _toolsScrollController,
-                          scrollDirection: Axis.horizontal,
-                          padding: const EdgeInsets.symmetric(horizontal: 8),
-                          children: [
-                            _compactToolBtn(Icons.undo, 'Отменить', _undo),
-                            const SizedBox(width: 8),
-                            _compactToolBtn(Icons.redo, 'Повторить', _redo),
-                            const SizedBox(width: 16),
-                            _compactToolBtnTool(Tool.brush, Icons.brush, 'Кисть'),
-                            const SizedBox(width: 8),
-                            _compactToolBtnTool(Tool.pencil, Icons.edit, 'Карандаш'),
-                            const SizedBox(width: 8),
-                            _compactToolBtnTool(Tool.eraser, Icons.auto_fix_high, 'Ластик'),
-                            const SizedBox(width: 16),
-                            _compactToolBtnZoom(Icons.zoom_in_map, 'Масштаб', _toggleZoomMode),
-                            const SizedBox(width: 16),
-                            _compactToolBtn(Icons.public, 'В ленту', _showPublishDialog),
-                            const SizedBox(width: 8),
-                            _compactToolBtn(Icons.color_lens, 'Палитра', () => setState(() => showPanel = !showPanel)),
-                            const SizedBox(width: 8),
-                            _compactToolBtn(Icons.grid_on, 'Сетка', () {}),
-                            const SizedBox(width: 8),
-                            _compactToolBtn(Icons.layers, 'Слои', () {}),
-                            const SizedBox(width: 8),
-                            _compactToolBtn(Icons.text_fields, 'Текст', () {}),
-                            const SizedBox(width: 8),
-                            _compactToolBtn(Icons.shape_line, 'Фигуры', () {}),
+            );
+            if (exit == true && mounted) {
+              Navigator.of(context).pop();
+            }
+          });
+        },
+        child: Scaffold(
+          backgroundColor: Colors.grey[900],
+          appBar: AppBar(
+            backgroundColor: Colors.transparent,
+            elevation: 0,
+            title: const Text(''),
+            automaticallyImplyLeading: false,
+            centerTitle: true,
+            toolbarHeight: 50,
+          ),
+          body: Stack(
+            children: [
+              // ХОЛСТ - нижний слой
+              Positioned.fill(
+                top: 110,
+                bottom: 0,
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onScaleStart: _handleScaleStart,
+                  onScaleUpdate: _handleScaleUpdate,
+                  onScaleEnd: _handleScaleEnd,
+                  child: Transform(
+                    transform: _transform,
+                    child: Center(
+                      child: Container(
+                        key: _canvasContainerKey,
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(8),
+                          boxShadow: const [
+                            BoxShadow(
+                              color: Colors.black54,
+                              blurRadius: 10,
+                              spreadRadius: 2,
+                            )
                           ],
                         ),
-                      ),
-                    ),
-                    
-                    Container(
-                      height: 60,
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      decoration: const BoxDecoration(
-                        color: Color.fromARGB(230, 30, 30, 30),
-                        border: Border(
-                          top: BorderSide(color: Colors.white12, width: 1),
+                        width: canvasSize.width,
+                        height: canvasSize.height,
+                        child: CustomPaint(
+                          painter: SketchPainter(
+                            strokes: strokes,
+                            currentStroke: currentStroke,
+                          ),
                         ),
                       ),
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: ElevatedButton.icon(
-                              onPressed: _saveImage,
-                              icon: const Icon(Icons.save_alt, size: 22),
-                              label: const Text('Сохранить', style: TextStyle(fontSize: 14)),
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: Colors.deepPurple,
-                                foregroundColor: Colors.white,
-                                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(25),
-                                ),
-                                elevation: 3,
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: 20),
-                          
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                            decoration: BoxDecoration(
-                              color: const Color.fromARGB(204, 60, 60, 60),
-                              borderRadius: BorderRadius.circular(20),
-                            ),
-                            child: Row(
-                              children: [
-                                Container(
-                                  width: 24,
-                                  height: 24,
-                                  decoration: BoxDecoration(
-                                    color: selectedColor,
-                                    shape: BoxShape.circle,
-                                    border: Border.all(color: Colors.white, width: 1),
-                                  ),
-                                ),
-                                const SizedBox(width: 12),
-                                Icon(
-                                  _getToolIcon(tool),
-                                  color: Colors.white70,
-                                  size: 18,
-                                ),
-                                const SizedBox(width: 8),
-                                Text(
-                                  '${strokeWidth.round()}',
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                                const SizedBox(width: 8),
-                                Text(
-                                  _getToolName(tool),
-                                  style: const TextStyle(
-                                    color: Colors.white70,
-                                    fontSize: 12,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
                     ),
-                  ],
+                  ),
                 ),
               ),
-            ),
 
-            if (_isZoomMode)
+              // ФИКСИРОВАННАЯ панель инструментов (сверху) - верхний слой
               Positioned(
-                top: 120,
-                left: 10,
+                top: 0,
+                left: 0,
+                right: 0,
                 child: Container(
-                  padding: const EdgeInsets.all(10),
+                  height: 110,
                   decoration: BoxDecoration(
-                    color: const Color.fromARGB(153, 0, 0, 0),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: Colors.white24, width: 1),
+                    color: const Color.fromRGBO(40, 40, 40, 0.95),
+                    border: const Border(
+                      bottom: BorderSide(color: Colors.white12, width: 1),
+                    ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withOpacity(0.5),
+                        blurRadius: 15,
+                        spreadRadius: 5,
+                      ),
+                    ],
                   ),
-                  child: const Row(
+                  child: Column(
                     children: [
-                      Icon(Icons.zoom_in_map, color: Colors.yellow, size: 16),
-                      SizedBox(width: 6),
-                      Text(
-                        'Режим панорамирования',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 12,
-                          fontWeight: FontWeight.w500,
+                      // Верхняя строка - основные инструменты
+                      SizedBox(
+                        height: 50,
+                        child: Scrollbar(
+                          controller: _toolsScrollController,
+                          thumbVisibility: true,
+                          child: ListView(
+                            controller: _toolsScrollController,
+                            scrollDirection: Axis.horizontal,
+                            padding: const EdgeInsets.symmetric(horizontal: 8),
+                            children: [
+                              _compactToolBtn(Icons.undo, 'Отменить', _undo),
+                              const SizedBox(width: 8),
+                              _compactToolBtn(Icons.redo, 'Повторить', _redo),
+                              const SizedBox(width: 16),
+                              _compactToolBtnTool(Tool.brush, Icons.brush, 'Кисть'),
+                              const SizedBox(width: 8),
+                              _compactToolBtnTool(Tool.pencil, Icons.edit, 'Карандаш'),
+                              const SizedBox(width: 8),
+                              _compactToolBtnTool(Tool.eraser, Icons.auto_fix_high, 'Ластик'),
+                              const SizedBox(width: 16),
+                              _compactToolBtnZoom(Icons.zoom_in_map, 'Масштаб', _toggleZoomMode),
+                              const SizedBox(width: 8),
+                              _compactToolBtn(Icons.zoom_out_map, 'Сбросить масштаб', _resetZoom),
+                              const SizedBox(width: 16),
+                              _compactToolBtn(Icons.public, 'В ленту', _showPublishDialog),
+                              const SizedBox(width: 8),
+                              _compactToolBtn(Icons.color_lens, 'Палитра', () => setState(() => showPanel = !showPanel)),
+                              const SizedBox(width: 8),
+                              _compactToolBtn(Icons.grid_on, 'Сетка', () {}),
+                              const SizedBox(width: 8),
+                              _compactToolBtn(Icons.layers, 'Слои', () {}),
+                              const SizedBox(width: 8),
+                            ],
+                          ),
+                        ),
+                      ),
+                      
+                      // Нижняя строка - сохранение и размер кисти
+                      Container(
+                        height: 60,
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        decoration: const BoxDecoration(
+                          color: Color.fromRGBO(30, 30, 30, 0.9),
+                          border: Border(
+                            top: BorderSide(color: Colors.white12, width: 1),
+                          ),
+                        ),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: ElevatedButton.icon(
+                                onPressed: _saveImage,
+                                icon: const Icon(Icons.save_alt, size: 22),
+                                label: const Text('Сохранить', style: TextStyle(fontSize: 14)),
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: Colors.deepPurple,
+                                  foregroundColor: Colors.white,
+                                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(25),
+                                  ),
+                                  elevation: 3,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 20),
+                            
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                              decoration: BoxDecoration(
+                                color: const Color.fromRGBO(60, 60, 60, 0.8),
+                                borderRadius: BorderRadius.circular(20),
+                              ),
+                              child: Row(
+                                children: [
+                                  Container(
+                                    width: 24,
+                                    height: 24,
+                                    decoration: BoxDecoration(
+                                      color: selectedColor,
+                                      shape: BoxShape.circle,
+                                      border: Border.all(color: Colors.white, width: 1),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Icon(
+                                    _getToolIcon(tool),
+                                    color: Colors.white70,
+                                    size: 18,
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    '${strokeWidth.round()}',
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    _getToolName(tool),
+                                    style: const TextStyle(
+                                      color: Colors.white70,
+                                      fontSize: 12,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
                         ),
                       ),
                     ],
                   ),
                 ),
               ),
-          ],
-        ),
 
-        bottomSheet: showPanel
-            ? Container(
-                height: 150,
-                decoration: BoxDecoration(
-                  color: const Color.fromARGB(242, 0, 0, 0),
-                  borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
-                  border: Border.all(color: Colors.white24, width: 1),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withOpacity(0.5),
-                      blurRadius: 20,
-                      spreadRadius: 5,
+              // Индикатор состояния режима масштабирования
+              if (_isZoomMode)
+                Positioned(
+                  top: 120,
+                  right: 10,
+                  child: Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: const Color.fromRGBO(0, 0, 0, 0.6),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: Colors.white24, width: 1),
                     ),
-                  ],
+                    child: Row(
+                      children: [
+                        Icon(Icons.zoom_in_map, color: Colors.yellow, size: 16),
+                        SizedBox(width: 6),
+                        Text(
+                          'Масштаб: ${_scale.toStringAsFixed(1)}x',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
                 ),
-                child: Column(
-                  children: [
-                    GestureDetector(
-                      onVerticalDragUpdate: (details) {
-                        if (details.delta.dy > 10) {
-                          setState(() => showPanel = false);
-                        }
-                      },
-                      child: Container(
-                        margin: const EdgeInsets.only(top: 10),
-                        width: 60,
-                        height: 5,
-                        decoration: BoxDecoration(
-                          color: Colors.white54,
-                          borderRadius: BorderRadius.circular(10),
+            ],
+          ),
+
+          // Панель настроек цветов
+          bottomSheet: showPanel
+              ? Container(
+                  height: 150,
+                  decoration: BoxDecoration(
+                    color: const Color.fromRGBO(0, 0, 0, 0.95),
+                    borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+                    border: Border.all(color: Colors.white24, width: 1),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withOpacity(0.5),
+                        blurRadius: 20,
+                        spreadRadius: 5,
+                      ),
+                    ],
+                  ),
+                  child: Column(
+                    children: [
+                      GestureDetector(
+                        onVerticalDragUpdate: (details) {
+                          if (details.delta.dy > 10) {
+                            setState(() => showPanel = false);
+                          }
+                        },
+                        child: Container(
+                          margin: const EdgeInsets.only(top: 10),
+                          width: 60,
+                          height: 5,
+                          decoration: BoxDecoration(
+                            color: Colors.white54,
+                            borderRadius: BorderRadius.circular(10),
+                          ),
                         ),
                       ),
-                    ),
-                    const SizedBox(height: 15),
-                    Expanded(
-                      child: ListView(
-                        scrollDirection: Axis.horizontal,
-                        padding: const EdgeInsets.symmetric(horizontal: 10),
-                        children: [
-                          ...[
-                            Colors.black,
-                            Colors.red,
-                            Colors.blue,
-                            Colors.green,
-                            Colors.yellow,
-                            Colors.purple,
-                            Colors.orange,
-                            Colors.brown,
-                            Colors.pink,
-                            Colors.cyan,
-                            Colors.grey,
-                            Colors.indigo,
-                            Colors.teal,
-                            Colors.amber,
-                            Colors.lightBlue,
-                          ].map((color) => Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 4),
-                            child: GestureDetector(
-                              onTap: () => setState(() => selectedColor = color),
-                              child: Container(
-                                width: 40,
-                                height: 40,
-                                decoration: BoxDecoration(
-                                  color: color,
-                                  shape: BoxShape.circle,
-                                  border: Border.all(
-                                    color: selectedColor == color
-                                        ? Colors.white
-                                        : Colors.transparent,
-                                    width: 3,
-                                  ),
-                                  boxShadow: [
-                                    BoxShadow(
-                                      color: Colors.black.withOpacity(0.3),
-                                      blurRadius: 4,
-                                      offset: const Offset(2, 2),
+                      const SizedBox(height: 15),
+                      Expanded(
+                        child: ListView(
+                          scrollDirection: Axis.horizontal,
+                          padding: const EdgeInsets.symmetric(horizontal: 10),
+                          children: [
+                            ...[
+                              Colors.black,
+                              Colors.red,
+                              Colors.blue,
+                              Colors.green,
+                              Colors.yellow,
+                              Colors.purple,
+                              Colors.orange,
+                              Colors.brown,
+                              Colors.pink,
+                              Colors.cyan,
+                              Colors.grey.shade700,
+                              Colors.indigo,
+                              Colors.teal,
+                              Colors.amber,
+                              Colors.lightBlue,
+                            ].map((color) => Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 4),
+                              child: GestureDetector(
+                                onTap: () => setState(() => selectedColor = color),
+                                child: Container(
+                                  width: 40,
+                                  height: 40,
+                                  decoration: BoxDecoration(
+                                    color: color,
+                                    shape: BoxShape.circle,
+                                    border: Border.all(
+                                      color: selectedColor == color
+                                          ? Colors.white
+                                          : Colors.transparent,
+                                      width: 3,
                                     ),
-                                  ],
+                                    boxShadow: [
+                                      BoxShadow(
+                                        color: Colors.black.withOpacity(0.3),
+                                        blurRadius: 4,
+                                        offset: const Offset(2, 2),
+                                      ),
+                                    ],
+                                  ),
+                                  child: selectedColor == color
+                                      ? const Icon(
+                                          Icons.check,
+                                          color: Colors.white,
+                                          size: 20,
+                                        )
+                                      : null,
                                 ),
-                                child: selectedColor == color
-                                    ? const Icon(
-                                        Icons.check,
-                                        color: Colors.white,
-                                        size: 20,
-                                      )
-                                    : null,
                               ),
-                            ),
-                          )),
-                        ],
+                            )),
+                          ],
+                        ),
                       ),
-                    ),
-                    Padding(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 25, vertical: 10),
-                      child: Row(
-                        children: [
-                          const Text(
-                            'Толщина:',
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 14,
-                              fontWeight: FontWeight.w500,
-                            ),
-                          ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: Slider(
-                              value: strokeWidth,
-                              min: 1,
-                              max: tool == Tool.eraser ? 50 : 30,
-                              divisions: tool == Tool.eraser ? 49 : 29,
-                              activeColor: tool == Tool.eraser
-                                  ? Colors.red
-                                  : Colors.deepPurple,
-                              inactiveColor: Colors.grey[700],
-                              onChanged: (value) =>
-                                  setState(() => strokeWidth = value),
-                            ),
-                          ),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 10, vertical: 4),
-                            decoration: BoxDecoration(
-                              color: const Color.fromARGB(179, 103, 58, 183),
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            child: Text(
-                              '${strokeWidth.round()}',
-                              style: const TextStyle(
+                      Padding(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 25, vertical: 10),
+                        child: Row(
+                          children: [
+                            const Text(
+                              'Толщина:',
+                              style: TextStyle(
                                 color: Colors.white,
-                                fontWeight: FontWeight.bold,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w500,
                               ),
                             ),
-                          ),
-                        ],
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Slider(
+                                value: strokeWidth,
+                                min: 1,
+                                max: tool == Tool.eraser ? 50 : 30,
+                                divisions: tool == Tool.eraser ? 49 : 29,
+                                activeColor: tool == Tool.eraser
+                                    ? Colors.red
+                                    : Colors.deepPurple,
+                                inactiveColor: Colors.grey[700],
+                                onChanged: (value) =>
+                                    setState(() => strokeWidth = value),
+                              ),
+                            ),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 10, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: const Color.fromRGBO(103, 58, 183, 0.7),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Text(
+                                '${strokeWidth.round()}',
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
-                    ),
-                  ],
-                ),
-              )
-            : null,
+                    ],
+                  ),
+                )
+              : null,
+        ),
       ),
     );
   }
 
+  // Компактные кнопки для панели инструментов
   Widget _compactToolBtn(IconData icon, String tooltip, VoidCallback onPressed) {
     return Tooltip(
       message: tooltip,
@@ -675,20 +675,20 @@ class _DrawPageState extends State<DrawPage> {
     Color iconColor;
     switch (t) {
       case Tool.brush:
-        iconColor = const Color(0xFF90CAF9);
+        iconColor = Colors.blue[200]!;
         break;
       case Tool.pencil:
-        iconColor = const Color(0xFFA5D6A7);
+        iconColor = Colors.green[200]!;
         break;
       case Tool.eraser:
-        iconColor = const Color(0xFFEF9A9A);
+        iconColor = Colors.red[200]!;
         break;
     }
 
     return Tooltip(
       message: tooltip,
       child: Material(
-        color: selected ? Color.fromARGB(51, iconColor.red, iconColor.green, iconColor.blue) : Colors.transparent,
+        color: selected ? iconColor.withOpacity(0.2) : Colors.transparent,
         borderRadius: BorderRadius.circular(8),
         child: InkWell(
           onTap: () {
@@ -717,7 +717,7 @@ class _DrawPageState extends State<DrawPage> {
     return Tooltip(
       message: tooltip,
       child: Material(
-        color: _isZoomMode ? const Color.fromARGB(51, 255, 255, 0) : Colors.transparent,
+        color: _isZoomMode ? Colors.yellow.withOpacity(0.2) : Colors.transparent,
         borderRadius: BorderRadius.circular(8),
         child: InkWell(
           onTap: onPressed,
@@ -899,7 +899,7 @@ class _DrawPageState extends State<DrawPage> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('Рисунок сохранен в галерее.'),
+            Text('Рисунок сохранен в галерее.'),
             const SizedBox(height: 12),
             _buildInfoRow('Размер:', '${width}x$height пикселей'),
             _buildInfoRow('Файл:', fileName),
@@ -1068,7 +1068,6 @@ class _DrawPageState extends State<DrawPage> {
     try {
       _showLoadingIndicator();
 
-      // 1. Создаем изображение
       final recorder = ui.PictureRecorder();
       final canvas = Canvas(recorder);
 
@@ -1082,7 +1081,7 @@ class _DrawPageState extends State<DrawPage> {
           ..color = stroke.isEraser ? Colors.white : stroke.color
           ..strokeWidth = stroke.width
           ..strokeCap = StrokeCap.round
-          ..style = PaintingStyle.stroke;
+          ..style =  PaintingStyle.stroke;
 
         if (stroke.points.length > 1) {
           final path = Path();
@@ -1099,28 +1098,27 @@ class _DrawPageState extends State<DrawPage> {
         canvasSize.width.toInt(),
         canvasSize.height.toInt(),
       );
-      final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+      final byteData =
+          await image.toByteData(format: ui.ImageByteFormat.png);
       final bytes = byteData!.buffer.asUint8List();
 
-      // 2. Сохраняем в Firebase Storage
-      final timestamp = DateTime.now().millisecondsSinceEpoch;
-      final fileName = 'sketches/sketch_$timestamp.png';
-      final ref = FirebaseStorage.instance.ref().child(fileName);
-      
-      final metadata = SettableMetadata(
-        contentType: 'image/png',
-        customMetadata: {
-          'author': FirebaseAuth.instance.currentUser?.uid ?? 'anonymous',
-        },
-      );
-      
-      await ref.putData(bytes, metadata);
-      final imageUrl = await ref.getDownloadURL();
+      final ref = FirebaseStorage.instance.ref().child(
+          'sketches/${canvasSize.width.toInt()}x${canvasSize.height.toInt()}_${DateTime.now().millisecondsSinceEpoch}.png');
+      await ref.putData(bytes);
+      final url = await ref.getDownloadURL();
 
-      // 3. Сохраняем в PostgreSQL
-      await _saveToPostgreSQL(imageUrl, caption);
+      await FirebaseFirestore.instance.collection('sketches').add({
+        'imageUrl': url,
+        'caption': caption,
+        'authorName': FirebaseAuth.instance.currentUser?.displayName ?? 'Аноним',
+        'authorId': FirebaseAuth.instance.currentUser?.uid,
+        'canvasSize': {'width': canvasSize.width, 'height': canvasSize.height},
+        'timestamp': FieldValue.serverTimestamp(),
+        'toolCount': strokes.length,
+        'dimensions': '${canvasSize.width.toInt()}x${canvasSize.height.toInt()}',
+        
+      });
 
-      // 4. Показываем успех
       _hideLoadingIndicator();
       _showMessage('Успешно опубликовано в ленту!');
       
@@ -1132,7 +1130,6 @@ class _DrawPageState extends State<DrawPage> {
     } catch (e) {
       _hideLoadingIndicator();
       _showMessage('Ошибка публикации: $e', isError: true);
-      debugPrint('Publish error details: $e');
     }
   }
 }
@@ -1163,37 +1160,54 @@ class SketchPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
+    // Белый фон холста
     canvas.drawRect(
       Rect.fromLTWH(0, 0, size.width, size.height),
       Paint()..color = Colors.white,
     );
-
-    final allStrokes = [...strokes];
-    if (currentStroke != null) {
-      allStrokes.add(currentStroke!);
-    }
-
-    for (final stroke in allStrokes) {
-      if (stroke.points.length < 2) continue;
-
+    
+    // Рисуем все сохранённые линии
+    for (final stroke in strokes) {
       final paint = Paint()
-        ..strokeCap = StrokeCap.round
-        ..strokeJoin = StrokeJoin.round
+        ..color = stroke.isEraser ? Colors.white : stroke.color
         ..strokeWidth = stroke.width
-        ..style = PaintingStyle.stroke
-        ..color = stroke.isEraser ? Colors.white : stroke.color;
-
-      final path = Path();
-      path.moveTo(stroke.points[0].dx, stroke.points[0].dy);
+        ..strokeCap = StrokeCap.round
+        ..style = PaintingStyle.stroke;
       
-      for (int i = 1; i < stroke.points.length; i++) {
-        path.lineTo(stroke.points[i].dx, stroke.points[i].dy);
+      if (stroke.points.length > 1) {
+        final path = Path();
+        path.moveTo(stroke.points[0].dx, stroke.points[0].dy);
+        for (int i = 1; i < stroke.points.length; i++) {
+          path.lineTo(stroke.points[i].dx, stroke.points[i].dy);
+        }
+        canvas.drawPath(path, paint);
       }
+    }
+    
+    // Рисуем текущую линию (если есть)
+    if (currentStroke != null) {
+      final paint = Paint()
+        ..color = currentStroke!.isEraser ? Colors.white : currentStroke!.color
+        ..strokeWidth = currentStroke!.width
+        ..strokeCap = StrokeCap.round
+        ..style = PaintingStyle.stroke;
       
-      canvas.drawPath(path, paint);
+      if (currentStroke!.points.length > 1) {
+        final path = Path();
+        path.moveTo(currentStroke!.points[0].dx, currentStroke!.points[0].dy);
+        for (int i = 1; i < currentStroke!.points.length; i++) {
+          path.lineTo(currentStroke!.points[i].dx, currentStroke!.points[i].dy);
+        }
+        canvas.drawPath(path, paint);
+      }
     }
   }
 
+  // ДОБАВЛЕННЫЙ МЕТОД - исправляет ошибку компиляции
   @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
+  bool shouldRepaint(covariant SketchPainter oldDelegate) {
+    // Перерисовываем если количество линий изменилось или изменилась текущая линия
+    return oldDelegate.strokes.length != strokes.length ||
+           oldDelegate.currentStroke != currentStroke;
+  }
 }

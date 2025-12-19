@@ -12,6 +12,7 @@ namespace SketchShareApi.Data
         public DbSet<User> Users { get; set; }
         public DbSet<Post> Posts { get; set; }
         public DbSet<Like> Likes { get; set; }
+        public DbSet<Role> Roles { get; set; }
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
@@ -45,25 +46,10 @@ namespace SketchShareApi.Data
                 .Property(l => l.CreatedAt)
                 .HasDefaultValueSql("NOW()");
 
-            // Создание индексов для производительности
-            modelBuilder.Entity<Post>()
-                .HasIndex(p => p.CreatedAt);
-
-            modelBuilder.Entity<Post>()
-                .HasIndex(p => p.LikeCount);
-
-            modelBuilder.Entity<Post>()
-                .HasIndex(p => p.UserId);
-
-            modelBuilder.Entity<Like>()
-                .HasIndex(l => l.Post_Id);
-
-            modelBuilder.Entity<Like>()
-                .HasIndex(l => l.User_Id);
-
+            // Уникальный лайк от пользователя на пост
             modelBuilder.Entity<Like>()
                 .HasIndex(l => new { l.Post_Id, l.User_Id })
-                .IsUnique(); // Уникальный лайк от пользователя на пост
+                .IsUnique();
 
             // Настройка User
             modelBuilder.Entity<User>()

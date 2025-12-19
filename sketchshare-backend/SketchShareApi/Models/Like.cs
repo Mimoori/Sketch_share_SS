@@ -10,7 +10,7 @@ public class Like
     public int User_Id { get; set; }
     public int Post_Id { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
-    //public int Count { get; set; } = 0;
+    public int Count { get; set; } = 0;
 
     public User User { get; set; } = null!;
     public Post Post { get; set; } = null!;

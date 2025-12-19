@@ -1,232 +1,17 @@
+// lib/pages/feed_page.dart
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:http/http.dart' as http;
-import 'dart:convert';
-import 'dart:async';
+import 'package:provider/provider.dart';
 import 'draw_page.dart';
 import 'profile_page.dart';
 import 'notifications_page.dart';
+import '../main.dart'; // Импортируем ThemeProvider из main.dart
 
-class FeedPage extends StatefulWidget {
+class FeedPage extends StatelessWidget {
   const FeedPage({super.key});
 
-  @override
-  State<FeedPage> createState() => _FeedPageState();
-}
-
-class _FeedPageState extends State<FeedPage> {
-  final FirebaseAuth _auth = FirebaseAuth.instance;
-  final ScrollController _scrollController = ScrollController();
-  
-  List<dynamic> _posts = [];
-  int _currentPage = 1;
-  int _totalPages = 1;
-  bool _isLoading = false;
-  bool _hasMore = true;
-  String _sortBy = 'newest';
-  Timer? _refreshTimer;
-
-  @override
-  void initState() {
-    super.initState();
-    _loadPosts();
-    _scrollController.addListener(_scrollListener);
-    
-    // Автообновление каждые 30 секунд
-    _refreshTimer = Timer.periodic(const Duration(seconds: 30), (timer) {
-      if (mounted) {
-        _loadPosts();
-      }
-    });
-  }
-
-  @override
-  void dispose() {
-    _scrollController.dispose();
-    _refreshTimer?.cancel();
-    super.dispose();
-  }
-
-  void _scrollListener() {
-    if (_scrollController.position.pixels == _scrollController.position.maxScrollExtent) {
-      if (_hasMore && !_isLoading) {
-        _loadMorePosts();
-      }
-    }
-  }
-
-  Future<List<dynamic>> _fetchPosts(int page) async {
-    try {
-      final response = await http.get(
-        Uri.parse('http://localhost:5432/api/posts?page=$page&pageSize=20&sortBy=$_sortBy'),
-        headers: {'Content-Type': 'application/json'},
-      );
-
-      if (response.statusCode == 200) {
-        final totalCount = int.parse(response.headers['x-total-count'] ?? '0');
-        final totalPages = int.parse(response.headers['x-total-pages'] ?? '1');
-        
-        setState(() {
-          _totalPages = totalPages;
-        });
-
-        return jsonDecode(response.body);
-      } else {
-        throw Exception('Failed to load posts: ${response.statusCode}');
-      }
-    } catch (e) {
-      print('Error fetching posts: $e');
-      // Fallback: пытаемся получить посты из Firebase
-      return _fetchPostsFromFirebase();
-    }
-  }
-
-  Future<List<dynamic>> _fetchPostsFromFirebase() async {
-    try {
-      final snapshot = await FirebaseFirestore.instance
-          .collection('sketches')
-          .where('isDeleted', isEqualTo: false)
-          .orderBy('timestamp', descending: true)
-          .limit(20)
-          .get();
-
-      return snapshot.docs.map((doc) {
-        final data = doc.data();
-        return {
-          'id': doc.id,
-          'title': data['caption'] ?? '',
-          'firebaseImageUrl': data['imageUrl'],
-          'likeCount': data['likeCount'] ?? 0,
-          'userId': data['authorId'],
-          'user': {'username': data['authorName'] ?? 'Аноним'},
-          'createdAt': (data['timestamp'] as Timestamp).toDate().toIso8601String(),
-          'canvasWidth': data['canvasSize']?['width'] ?? 1000,
-          'canvasHeight': data['canvasSize']?['height'] ?? 1000,
-          'strokeCount': data['toolCount'] ?? 0,
-          'isFromFirebase': true,
-        };
-      }).toList();
-    } catch (e) {
-      print('Error fetching from Firebase: $e');
-      return [];
-    }
-  }
-
-  Future<void> _loadPosts() async {
-    if (_isLoading) return;
-    
-    setState(() {
-      _isLoading = true;
-      _currentPage = 1;
-    });
-
-    try {
-      final posts = await _fetchPosts(1);
-      
-      setState(() {
-        _posts = posts;
-        _isLoading = false;
-        _hasMore = posts.length == 20 && _currentPage < _totalPages;
-      });
-    } catch (e) {
-      print('Error loading posts: $e');
-      setState(() => _isLoading = false);
-      _showMessage('Ошибка загрузки постов');
-    }
-  }
-
-  Future<void> _loadMorePosts() async {
-    if (_isLoading || !_hasMore) return;
-    
-    setState(() => _isLoading = true);
-
-    try {
-      final newPosts = await _fetchPosts(_currentPage + 1);
-      
-      setState(() {
-        _posts.addAll(newPosts);
-        _currentPage++;
-        _isLoading = false;
-        _hasMore = newPosts.length == 20 && _currentPage < _totalPages;
-      });
-    } catch (e) {
-      print('Error loading more posts: $e');
-      setState(() => _isLoading = false);
-    }
-  }
-
-  Future<void> _toggleLike(int postId) async {
-    try {
-      final currentUser = _auth.currentUser;
-      if (currentUser == null) {
-        _showMessage('Войдите в аккаунт чтобы ставить лайки');
-        return;
-      }
-
-      // Отправляем запрос в PostgreSQL API
-      final token = await currentUser.getIdToken();
-      final response = await http.put(
-        Uri.parse('http://localhost:5000/api/posts/$postId/like'),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $token',
-        },
-      );
-
-      if (response.statusCode == 200) {
-        final result = jsonDecode(response.body);
-        final newLikeCount = result['likeCount'] as int;
-        
-        // Обновляем локально
-        setState(() {
-          final index = _posts.indexWhere((p) => p['id'] == postId);
-          if (index != -1) {
-            _posts[index]['likeCount'] = newLikeCount;
-          }
-        });
-
-        // Отправляем уведомление
-        await _sendLikeNotification(postId);
-      } else {
-        throw Exception('Failed to toggle like');
-      }
-    } catch (e) {
-      print('Error toggling like: $e');
-      _showMessage('Ошибка при обновлении лайка');
-    }
-  }
-
-  Future<void> _sendLikeNotification(int postId) async {
-    try {
-      final currentUser = _auth.currentUser;
-      if (currentUser == null) return;
-
-      final post = _posts.firstWhere((p) => p['id'] == postId);
-      final authorId = post['userId'];
-
-      await FirebaseFirestore.instance.collection('notifications').add({
-        'userId': authorId,
-        'title': 'Новый лайк',
-        'body': '${currentUser.displayName} понравился ваш скетч',
-        'timestamp': FieldValue.serverTimestamp(),
-        'read': false,
-        'postId': postId,
-      });
-    } catch (e) {
-      print('Error sending notification: $e');
-    }
-  }
-
-  Future<void> _showDeleteDialog(String postId, String authorName) async {
-    final currentUser = _auth.currentUser;
-    final isAdmin = currentUser?.email == 'admin@example.com';
-
-    if (!isAdmin) {
-      _showMessage('Только администратор может удалять посты');
-      return;
-    }
-
+  Future<void> _showDeleteDialog(BuildContext context, String sketchId) async {
     final reasons = [
       "Нарушение правил",
       "Спам",
@@ -238,37 +23,22 @@ class _FeedPageState extends State<FeedPage> {
     final reason = await showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Удалить пост?'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('Автор: $authorName'),
-            const SizedBox(height: 16),
-            const Text('Причина удаления:'),
-            SizedBox(
-              width: double.maxFinite,
-              height: 200,
-              child: ListView.builder(
-                shrinkWrap: true,
-                itemCount: reasons.length,
-                itemBuilder: (context, i) => ListTile(
-                  title: Text(reasons[i]),
-                  onTap: () => Navigator.pop(context, reasons[i]),
-                ),
-              ),
+        title: const Text('Причина удаления'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: ListView.builder(
+            shrinkWrap: true,
+            itemCount: reasons.length,
+            itemBuilder: (context, i) => ListTile(
+              title: Text(reasons[i]),
+              onTap: () => Navigator.pop(context, reasons[i]),
             ),
-          ],
+          ),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
             child: const Text('Отмена'),
-          ),
-          ElevatedButton(
-            onPressed: () => Navigator.pop(context, reasons.last),
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
-            child: const Text('Удалить'),
           ),
         ],
       ),
@@ -276,41 +46,94 @@ class _FeedPageState extends State<FeedPage> {
 
     if (reason == null) return;
 
-    try {
-      final token = await currentUser!.getIdToken();
-      final response = await http.delete(
-        Uri.parse('http://localhost:5000/api/posts/$postId'),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $token',
-        },
-        body: jsonEncode({'reason': reason}),
-      );
+    await FirebaseFirestore.instance.collection('sketches').doc(sketchId).update({
+      'isDeleted': true,
+      'deleteReason': reason,
+      'deletedAt': FieldValue.serverTimestamp(),
+    });
 
-      if (response.statusCode == 204) {
-        _showMessage('Пост удален');
-        _loadPosts(); // Перезагружаем список
-      } else {
-        throw Exception('Failed to delete post');
-      }
-    } catch (e) {
-      print('Error deleting post: $e');
-      _showMessage('Ошибка при удалении поста');
+    final sketchSnapshot =
+        await FirebaseFirestore.instance.collection('sketches').doc(sketchId).get();
+    final authorId = sketchSnapshot['authorId'] as String?;
+
+    if (authorId != null) {
+      await FirebaseFirestore.instance.collection('notifications').add({
+        'userId': authorId,
+        'title': 'Скетч удалён',
+        'body': 'Ваш скетч был удалён модератором.\nПричина: $reason',
+        'timestamp': FieldValue.serverTimestamp(),
+      });
     }
+
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Скетч удалён по причине: $reason')),
+    );
   }
 
-  void _showMessage(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message),
-        duration: const Duration(seconds: 2),
-      ),
-    );
+  // Функция для переключения лайка
+  Future<void> _toggleLike(
+      BuildContext context, String sketchId, bool isLiked, int currentLikes) async {
+    final currentUserId = FirebaseAuth.instance.currentUser?.uid;
+    if (currentUserId == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Войдите в аккаунт чтобы ставить лайки')),
+      );
+      return;
+    }
+
+    final firestore = FirebaseFirestore.instance;
+
+    if (isLiked) {
+      // Удаляем лайк
+      final likeQuery = await firestore
+          .collection('likes')
+          .where('sketchId', isEqualTo: sketchId)
+          .where('userId', isEqualTo: currentUserId)
+          .get();
+
+      for (var doc in likeQuery.docs) {
+        await doc.reference.delete();
+      }
+
+      // Уменьшаем счетчик
+      await firestore.collection('sketches').doc(sketchId).update({
+        'likeCount': FieldValue.increment(-1),
+      });
+    } else {
+      // Добавляем лайк
+      await firestore.collection('likes').add({
+        'sketchId': sketchId,
+        'userId': currentUserId,
+        'timestamp': FieldValue.serverTimestamp(),
+      });
+
+      // Увеличиваем счетчик
+      await firestore.collection('sketches').doc(sketchId).update({
+        'likeCount': FieldValue.increment(1),
+      });
+
+      // Отправляем уведомление автору
+      final sketchDoc = await firestore.collection('sketches').doc(sketchId).get();
+      final authorId = sketchDoc['authorId'] as String?;
+      final currentUserName =
+          FirebaseAuth.instance.currentUser?.displayName ?? 'Пользователь';
+
+      if (authorId != null && authorId != currentUserId) {
+        await firestore.collection('notifications').add({
+          'userId': authorId,
+          'title': 'Новый лайк',
+          'body': '$currentUserName понравился ваш скетч',
+          'timestamp': FieldValue.serverTimestamp(),
+          'read': false,
+        });
+      }
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    final currentUser = _auth.currentUser;
+    final currentUser = FirebaseAuth.instance.currentUser;
     final isAdmin = currentUser?.email == 'admin@example.com';
 
     return Scaffold(
@@ -319,39 +142,10 @@ class _FeedPageState extends State<FeedPage> {
         backgroundColor: Colors.deepPurple,
         foregroundColor: Colors.white,
         actions: [
-          // Сортировка
-          PopupMenuButton<String>(
-            onSelected: (value) {
-              setState(() {
-                _sortBy = value;
-                _loadPosts();
-              });
-            },
-            itemBuilder: (context) => [
-              const PopupMenuItem(
-                value: 'newest',
-                child: Text('Сначала новые'),
-              ),
-              const PopupMenuItem(
-                value: 'popular',
-                child: Text('Популярные'),
-              ),
-              const PopupMenuItem(
-                value: 'views',
-                child: Text('Просмотры'),
-              ),
-            ],
-            icon: const Icon(Icons.sort),
-          ),
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: _loadPosts,
-            tooltip: 'Обновить',
-          ),
           IconButton(
             icon: const Icon(Icons.person),
-            onPressed: () => Navigator.push(
-                context, MaterialPageRoute(builder: (_) => const ProfilePage())),
+            onPressed: () =>
+                Navigator.push(context, MaterialPageRoute(builder: (_) => const ProfilePage())),
           ),
         ],
       ),
@@ -376,28 +170,22 @@ class _FeedPageState extends State<FeedPage> {
               onTap: () => Navigator.push(context,
                   MaterialPageRoute(builder: (_) => const NotificationsPage())),
             ),
-            ListTile(
-              leading: const Icon(Icons.dark_mode),
-              title: const Text('Тёмная тема'),
-              trailing: Switch(
-                value: Theme.of(context).brightness == Brightness.dark,
-                onChanged: (val) {
-                  Navigator.pushReplacement(
-                    context,
-                    MaterialPageRoute(
-                      builder: (_) => MaterialApp(
-                        theme: val ? ThemeData.dark() : ThemeData.light(),
-                        home: const FeedPage(),
-                      ),
-                    ),
-                  );
-                },
-              ),
-            ),
-            const Divider(),
-            ListTile(
-              leading: Icon(Icons.info, color: Colors.grey[600]),
-              title: Text('Версия 1.0.0', style: TextStyle(color: Colors.grey[600])),
+            // Исправленный Switch для темы
+            Consumer<ThemeProvider>(
+              builder: (context, themeProvider, child) {
+                return ListTile(
+                  leading: const Icon(Icons.dark_mode),
+                  title: const Text('Тёмная тема'),
+                  trailing: Switch(
+                    value: themeProvider.isDarkMode,
+                    onChanged: (val) {
+                      themeProvider.setThemeMode(
+                        val ? ThemeMode.dark : ThemeMode.light
+                      );
+                    },
+                  ),
+                );
+              },
             ),
             ListTile(
               leading: const Icon(Icons.logout, color: Colors.red),
@@ -407,221 +195,386 @@ class _FeedPageState extends State<FeedPage> {
           ],
         ),
       ),
-      body: _isLoading && _posts.isEmpty
-          ? const Center(child: CircularProgressIndicator())
-          : RefreshIndicator(
-              onRefresh: _loadPosts,
-              child: _posts.isEmpty
-                  ? const Center(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Icon(Icons.brush, size: 64, color: Colors.grey),
-                          SizedBox(height: 16),
-                          Text('Пока нет скетчей',
-                              style: TextStyle(fontSize: 18, color: Colors.grey)),
-                          Text('Создайте первый!', style: TextStyle(color: Colors.grey)),
-                        ],
-                      ),
-                    )
-                  : ListView.builder(
-                      controller: _scrollController,
-                      itemCount: _posts.length + (_hasMore ? 1 : 0),
-                      itemBuilder: (context, index) {
-                        if (index >= _posts.length) {
-                          return _buildLoader();
-                        }
-                        
-                        final post = _posts[index];
-                        return _buildPostItem(post, isAdmin);
-                      },
-                    ),
-            ),
-      floatingActionButton: FloatingActionButton(
-        backgroundColor: Colors.deepPurple,
-        onPressed: () => Navigator.push(
-            context, MaterialPageRoute(builder: (_) => const DrawPage())),
-        child: const Icon(Icons.add, color: Colors.white),
-        tooltip: 'Создать скетч',
-      ),
-    );
-  }
+      body: StreamBuilder<QuerySnapshot>(
+        stream: FirebaseFirestore.instance
+            .collection('sketches')
+            .where('isDeleted', isEqualTo: false)
+            .orderBy('timestamp', descending: true)
+            .snapshots(),
+        builder: (context, snapshot) {
+          if (snapshot.hasError) return const Center(child: Text('Ошибка загрузки'));
+          if (!snapshot.hasData) {
+            return const Center(child: CircularProgressIndicator());
+          }
 
-  Widget _buildPostItem(Map<String, dynamic> post, bool isAdmin) {
-    final imageUrl = post['firebaseImageUrl'] ?? post['imageUrl'];
-    final author = post['user']?['username'] ?? 'Аноним';
-    final likeCount = post['likeCount'] ?? 0;
-    final caption = post['title'] ?? '';
-    final createdAt = DateTime.parse(post['createdAt']);
-    final postId = post['id'].toString();
-
-    return Card(
-      margin: const EdgeInsets.all(8),
-      elevation: 2,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Заголовок и автор
-          ListTile(
-            leading: CircleAvatar(
-              backgroundColor: Colors.deepPurple,
-              child: Text(
-                author.substring(0, 1).toUpperCase(),
-                style: const TextStyle(color: Colors.white),
+          final docs = snapshot.data!.docs;
+          if (docs.isEmpty) {
+            return const Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.brush, size: 64, color: Colors.grey),
+                  SizedBox(height: 16),
+                  Text('Пока нет скетчей',
+                      style: TextStyle(fontSize: 18, color: Colors.grey)),
+                  Text('Создайте первый!', style: TextStyle(color: Colors.grey)),
+                ],
               ),
-            ),
-            title: Text(
-              author,
-              style: const TextStyle(fontWeight: FontWeight.bold),
-            ),
-            subtitle: Text(_formatDate(createdAt)),
-            trailing: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (isAdmin)
-                  IconButton(
-                    icon: const Icon(Icons.delete, color: Colors.red, size: 20),
-                    onPressed: () => _showDeleteDialog(postId, author),
-                    padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints(),
-                  ),
-                IconButton(
-                  icon: const Icon(Icons.more_vert),
-                  onPressed: () => _showPostOptions(post),
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(),
-                ),
-              ],
-            ),
-          ),
+            );
+          }
 
-          // Изображение
-          if (imageUrl != null && imageUrl.isNotEmpty)
-            GestureDetector(
-              onDoubleTap: () => _toggleLike(int.parse(postId)),
-              onTap: () => _showImageFullscreen(imageUrl),
-              child: Container(
-                height: 300,
-                width: double.infinity,
-                decoration: BoxDecoration(
-                  image: DecorationImage(
-                    image: NetworkImage(imageUrl),
-                    fit: BoxFit.cover,
-                  ),
-                ),
-                child: Stack(
-                  children: [
-                    // Информация о размере
-                    Positioned(
-                      top: 8,
-                      left: 8,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: const Color.fromARGB(140, 0, 0, 0),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Text(
-                          '${post['canvasWidth'] ?? 1000}×${post['canvasHeight'] ?? 1000}',
-                          style: const TextStyle(color: Colors.white, fontSize: 12),
-                        ),
-                      ),
-                    ),
-                    // Кнопка лайка
-                    Positioned(
-                      bottom: 8,
-                      right: 8,
-                      child: GestureDetector(
-                        onTap: () => _toggleLike(int.parse(postId)),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          return GridView.builder(
+            padding: const EdgeInsets.all(12),
+            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: 2,
+              crossAxisSpacing: 12,
+              mainAxisSpacing: 12,
+              childAspectRatio: 1,
+            ),
+            itemCount: docs.length,
+            itemBuilder: (context, i) {
+              final data = docs[i].data() as Map<String, dynamic>;
+              final sketchId = docs[i].id;
+              final imageUrl = data['imageUrl'] as String;
+              final author = data['authorName'] ?? 'Аноним';
+              final likeCount = (data['likeCount'] as int?) ?? 0;
+              final caption = data['caption'] as String? ?? '';
+
+              return StreamBuilder<QuerySnapshot>(
+                stream: FirebaseFirestore.instance
+                    .collection('likes')
+                    .where('sketchId', isEqualTo: sketchId)
+                    .where('userId', isEqualTo: currentUser?.uid)
+                    .snapshots(),
+                builder: (context, likeSnapshot) {
+                  final isLiked = likeSnapshot.data?.docs.isNotEmpty ?? false;
+
+                  return GestureDetector(
+                    onTap: () => _showSketchDetails(context, sketchId, data),
+                    child: Stack(
+                      children: [
+                        // Фон с изображением
+                        Container(
                           decoration: BoxDecoration(
-                            color: const Color.fromARGB(140, 0, 0, 0),
                             borderRadius: BorderRadius.circular(20),
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const Icon(Icons.favorite, color: Colors.white, size: 16),
-                              const SizedBox(width: 6),
-                              Text(
-                                likeCount.toString(),
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.bold,
-                                ),
+                            image: DecorationImage(
+                              image: NetworkImage(imageUrl),
+                              fit: BoxFit.cover,
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withOpacity(0.2),
+                                blurRadius: 8,
+                                spreadRadius: 2,
                               ),
                             ],
                           ),
                         ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
 
-          // Подпись и действия
-          Padding(
-            padding: const EdgeInsets.all(12),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                if (caption.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 8),
-                    child: Text(
-                      caption,
-                      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
-                      maxLines: 3,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                Row(
-                  children: [
-                    Expanded(
-                      child: Row(
-                        children: [
-                          IconButton(
-                            icon: const Icon(Icons.favorite_border),
-                            onPressed: () => _toggleLike(int.parse(postId)),
-                            tooltip: 'Лайкнуть',
+                        // Градиент сверху для лучшей читаемости
+                        Container(
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(20),
+                            gradient: const LinearGradient(
+                              begin: Alignment.topCenter,
+                              end: Alignment.bottomCenter,
+                              colors: [
+                                Color.fromARGB(140, 0, 0, 0),
+                                Colors.transparent,
+                                Colors.transparent,
+                                Color.fromARGB(140, 0, 0, 0),
+                              ],
+                            ),
                           ),
-                          Text(
-                            '$likeCount лайков',
-                            style: const TextStyle(color: Colors.grey),
+                        ),
+
+                        // Информация вверху
+                        Positioned(
+                          top: 8,
+                          left: 8,
+                          right: 8,
+                          child: Row(
+                            children: [
+                              Container(
+                                padding:
+                                    const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                decoration: BoxDecoration(
+                                  color: const Color.fromARGB(140, 0, 0, 0),
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: Text(
+                                  author,
+                                  style: const TextStyle(color: Colors.white, fontSize: 12),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                              const Spacer(),
+                              if (isAdmin)
+                                IconButton(
+                                  icon: const Icon(Icons.delete_forever,
+                                      size: 20, color: Colors.red),
+                                  onPressed: () => _showDeleteDialog(context, sketchId),
+                                ),
+                            ],
                           ),
-                        ],
-                      ),
+                        ),
+
+                        // Кнопка лайка внизу
+                        Positioned(
+                          bottom: 8,
+                          right: 8,
+                          child: GestureDetector(
+                            onTap: () => _toggleLike(context, sketchId, isLiked, likeCount),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                              decoration: BoxDecoration(
+                                color: const Color.fromARGB(140, 0, 0, 0),
+                                borderRadius: BorderRadius.circular(15),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(
+                                    isLiked ? Icons.favorite : Icons.favorite_border,
+                                    color: isLiked ? Colors.red : Colors.white,
+                                    size: 16,
+                                  ),
+                                  const SizedBox(width: 4),
+                                  Text(
+                                    likeCount.toString(),
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+
+                        // Подпись внизу слева
+                        if (caption.isNotEmpty)
+                          Positioned(
+                            bottom: 8,
+                            left: 8,
+                            right: 60,
+                            child: Container(
+                              padding:
+                                  const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: const Color.fromARGB(140, 0, 0, 0),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Text(
+                                caption,
+                                style: const TextStyle(color: Colors.white, fontSize: 12),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ),
+                      ],
                     ),
-                    IconButton(
-                      icon: const Icon(Icons.share),
-                      onPressed: () => _sharePost(post),
-                      tooltip: 'Поделиться',
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.bookmark_border),
-                      onPressed: () => _savePost(post),
-                      tooltip: 'Сохранить',
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        ],
+                  );
+                },
+              );
+            },
+          );
+        },
+      ),
+      floatingActionButton: FloatingActionButton(
+        backgroundColor: Colors.deepPurple,
+        onPressed: () =>
+            Navigator.push(context, MaterialPageRoute(builder: (_) => const DrawPage())),
+        child: const Icon(Icons.add, color: Colors.white),
       ),
     );
   }
 
-  Widget _buildLoader() {
-    return _isLoading
-        ? const Padding(
-            padding: EdgeInsets.all(20),
-            child: Center(child: CircularProgressIndicator()),
-          )
-        : Container();
+  // Функция для просмотра деталей скетча
+  void _showSketchDetails(
+      BuildContext context, String sketchId, Map<String, dynamic> data) {
+    final imageUrl = data['imageUrl'] as String;
+    final author = data['authorName'] ?? 'Аноним';
+    final caption = data['caption'] as String? ?? '';
+    final timestamp = data['timestamp'] as Timestamp?;
+    final date = timestamp?.toDate() ?? DateTime.now();
+    final likeCount = (data['likeCount'] as int?) ?? 0;
+    final canvasSize = data['canvasSize'] as Map<String, dynamic>? ?? {};
+    final width = (canvasSize['width'] as num?)?.toInt() ?? 1000;
+    final height = (canvasSize['height'] as num?)?.toInt() ?? 1000;
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => GestureDetector(
+        onTap: () => Navigator.pop(context),
+        child: Container(
+          color: const Color.fromARGB(128, 0, 0, 0),
+          child: DraggableScrollableSheet(
+            initialChildSize: 0.9,
+            minChildSize: 0.5,
+            maxChildSize: 0.95,
+            builder: (context, scrollController) {
+              return Container(
+                decoration: BoxDecoration(
+                  color: Theme.of(context).cardColor,
+                  borderRadius: const BorderRadius.vertical(top: Radius.circular(25)),
+                ),
+                child: Column(
+                  children: [
+                    // Ручка для драга
+                    Container(
+                      margin: const EdgeInsets.only(top: 10),
+                      width: 60,
+                      height: 5,
+                      decoration: BoxDecoration(
+                        color: Theme.of(context).dividerColor,
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                    ),
+
+                    Expanded(
+                      child: ListView(
+                        controller: scrollController,
+                        padding: const EdgeInsets.all(16),
+                        children: [
+                          // Изображение
+                          Container(
+                            height: 300,
+                            width: double.infinity,
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(15),
+                              image: DecorationImage(
+                                image: NetworkImage(imageUrl),
+                                fit: BoxFit.contain,
+                              ),
+                              color: Theme.of(context).canvasColor,
+                            ),
+                          ),
+
+                          const SizedBox(height: 20),
+
+                          // Информация
+                          Row(
+                            children: [
+                              const CircleAvatar(
+                                backgroundColor: Colors.deepPurple,
+                                child: Icon(Icons.person, color: Colors.white),
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      author,
+                                      style: const TextStyle(
+                                        fontSize: 16,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                    Text(
+                                      _formatDate(date),
+                                      style: TextStyle(
+                                          color: Theme.of(context).hintColor, fontSize: 12),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+
+                          const SizedBox(height: 20),
+
+                          // Подпись
+                          if (caption.isNotEmpty)
+                            Container(
+                              padding: const EdgeInsets.all(12),
+                              decoration: BoxDecoration(
+                                color: Theme.of(context).hoverColor,
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Text(
+                                caption,
+                                style: const TextStyle(fontSize: 14),
+                              ),
+                            ),
+
+                          const SizedBox(height: 20),
+
+                          // Детали
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceAround,
+                            children: [
+                              _buildDetailItem(
+                                context,
+                                Icons.photo_size_select_actual,
+                                '${width}x$height',
+                              ),
+                              StreamBuilder<QuerySnapshot>(
+                                stream: FirebaseFirestore.instance
+                                    .collection('likes')
+                                    .where('sketchId', isEqualTo: sketchId)
+                                    .snapshots(),
+                                builder: (context, snapshot) {
+                                  final count = snapshot.data?.docs.length ?? likeCount;
+                                  return _buildDetailItem(
+                                    context,
+                                    Icons.favorite,
+                                    '$count',
+                                  );
+                                },
+                              ),
+                              _buildDetailItem(
+                                context,
+                                Icons.brush,
+                                '${data['toolCount'] ?? 0} штрихов',
+                              ),
+                            ],
+                          ),
+
+                          const SizedBox(height: 30),
+
+                          // Кнопка сохранить
+                          ElevatedButton.icon(
+                            onPressed: () => _saveImageToGallery(context, imageUrl),
+                            icon: const Icon(Icons.download),
+                            label: const Text('Сохранить в галерею'),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.deepPurple,
+                              foregroundColor: Colors.white,
+                              minimumSize: const Size(double.infinity, 50),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDetailItem(BuildContext context, IconData icon, String text) {
+    return Column(
+      children: [
+        Icon(icon, color: Colors.deepPurple),
+        const SizedBox(height: 4),
+        Text(text, style: const TextStyle(fontSize: 12)),
+      ],
+    );
   }
 
   String _formatDate(DateTime date) {
@@ -643,114 +596,12 @@ class _FeedPageState extends State<FeedPage> {
     }
   }
 
-  void _showImageFullscreen(String imageUrl) {
-    showDialog(
-      context: context,
-      builder: (context) => Dialog(
-        backgroundColor: Colors.transparent,
-        insetPadding: const EdgeInsets.all(0),
-        child: GestureDetector(
-          onTap: () => Navigator.pop(context),
-          child: Container(
-            width: double.infinity,
-            height: double.infinity,
-            color: Colors.black87,
-            child: Center(
-              child: Image.network(
-                imageUrl,
-                fit: BoxFit.contain,
-                loadingBuilder: (context, child, loadingProgress) {
-                  if (loadingProgress == null) return child;
-                  return Center(
-                    child: CircularProgressIndicator(
-                      value: loadingProgress.expectedTotalBytes != null
-                          ? loadingProgress.cumulativeBytesLoaded /
-                              loadingProgress.expectedTotalBytes!
-                          : null,
-                    ),
-                  );
-                },
-              ),
-            ),
-          ),
-        ),
+  Future<void> _saveImageToGallery(BuildContext context, String imageUrl) async {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Функция сохранения скоро будет доступна'),
+        duration: Duration(seconds: 2),
       ),
     );
-  }
-
-  void _showPostOptions(Map<String, dynamic> post) {
-    showModalBottomSheet(
-      context: context,
-      builder: (context) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: const Icon(Icons.report),
-              title: const Text('Пожаловаться'),
-              onTap: () {
-                Navigator.pop(context);
-                _reportPost(post);
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.link),
-              title: const Text('Копировать ссылку'),
-              onTap: () {
-                Navigator.pop(context);
-                _copyPostLink(post);
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.download),
-              title: const Text('Сохранить изображение'),
-              onTap: () {
-                Navigator.pop(context);
-                _savePostImage(post);
-              },
-            ),
-            const Divider(),
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('Отмена'),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  void _reportPost(Map<String, dynamic> post) {
-    _showMessage('Жалоба отправлена');
-  }
-
-  void _copyPostLink(Map<String, dynamic> post) {
-    _showMessage('Ссылка скопирована');
-  }
-
-  void _savePost(Map<String, dynamic> post) {
-    _showMessage('Пост сохранен');
-  }
-
-  void _sharePost(Map<String, dynamic> post) {
-    final imageUrl = post['firebaseImageUrl'] ?? post['imageUrl'];
-    final caption = post['title'] ?? '';
-    final author = post['user']?['username'] ?? 'Аноним';
-    
-    _showMessage('Функция шаринга будет добавлена позже');
-  }
-
-  Future<void> _savePostImage(Map<String, dynamic> post) async {
-    final imageUrl = post['firebaseImageUrl'] ?? post['imageUrl'];
-    if (imageUrl == null) return;
-
-    try {
-      _showMessage('Скачивание...');
-      // Здесь можно добавить сохранение изображения
-      await Future.delayed(const Duration(seconds: 1));
-      _showMessage('Изображение готово к сохранению');
-    } catch (e) {
-      _showMessage('Ошибка при сохранении');
-    }
   }
 }
