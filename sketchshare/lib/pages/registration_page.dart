@@ -42,7 +42,7 @@ class _RegistrationPageState extends State<RegistrationPage> {
     setState(() => _isLoading = true);
 
     try {
-      // 1. Создаем пользователя в Firebase Auth
+      
       final UserCredential userCredential = 
           await FirebaseAuth.instance.createUserWithEmailAndPassword(
         email: _emailController.text.trim(),
@@ -51,7 +51,7 @@ class _RegistrationPageState extends State<RegistrationPage> {
 
       final user = userCredential.user!;
       
-      // 2. Обновляем displayName в Firebase Auth
+      
       await user.updateDisplayName(_nameController.text.trim());
       
       // 3. Создаем/обновляем профиль в Firestore

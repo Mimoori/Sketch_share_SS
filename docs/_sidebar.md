@@ -1,0 +1,6 @@
+- [Главная](/README.md)
+- **Руководство**
+  - [Введение](/guide/intrduction.md)
+  - [Возможности](/guide/features.md)
+  - [Использование](/guide/usage.md)
+  - [Начало](/guide/getting-started.md)

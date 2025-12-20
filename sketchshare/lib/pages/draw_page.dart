@@ -1,11 +1,12 @@
 import 'dart:ui' as ui;
 import 'dart:io';
 import 'dart:typed_data';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:firebase_storage/firebase_storage.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:provider/provider.dart';
+import '../main.dart'; // Импортируем SketchesProvider
 
 class DrawPage extends StatefulWidget {
   const DrawPage({super.key});
@@ -23,10 +24,7 @@ class _DrawPageState extends State<DrawPage> {
   bool showPanel = false;
   bool _isZoomMode = false;
   
-  // Ключ для получения позиции контейнера холста
   final GlobalKey _canvasContainerKey = GlobalKey();
-  
-  // Фиксированная панель инструментов
   final ScrollController _toolsScrollController = ScrollController();
 
   final Map<String, Size> canvasSizes = {
@@ -37,7 +35,6 @@ class _DrawPageState extends State<DrawPage> {
   };
   late Size canvasSize;
 
-  // Для плавного масштабирования
   Matrix4 _transform = Matrix4.identity();
   double _scale = 1.0;
   double _lastScale = 1.0;
@@ -103,12 +100,10 @@ class _DrawPageState extends State<DrawPage> {
 
   void _handleScaleStart(ScaleStartDetails details) {
     if (_isZoomMode) {
-      // РЕЖИМ МАСШТАБИРОВАНИЯ: запоминаем начальную точку
       _lastFocalPoint = details.localFocalPoint;
       _lastScale = _scale;
       _isPanning = true;
     } else {
-      // РЕЖИМ РИСОВАНИЯ: начинаем рисовать
       try {
         final renderBox = _canvasContainerKey.currentContext?.findRenderObject() as RenderBox?;
         if (renderBox == null) return;
@@ -136,27 +131,22 @@ class _DrawPageState extends State<DrawPage> {
 
   void _handleScaleUpdate(ScaleUpdateDetails details) {
     if (_isZoomMode && _isPanning) {
-      // ПЛАВНОЕ МАСШТАБИРОВАНИЕ ДВУМЯ ПАЛЬЦАМИ + ПАНОРАМИРОВАНИЕ
       setState(() {
-        // Масштабирование
         if (details.scale != 1.0) {
-          _scale = (_lastScale * details.scale).clamp(0.5, 5.0); // Ограничиваем масштаб
+          _scale = (_lastScale * details.scale).clamp(0.5, 5.0);
         }
         
-        // Панорамирование
         if (_lastFocalPoint != null && details.focalPointDelta != Offset.zero) {
           final delta = details.focalPointDelta;
           _offset += delta;
           _lastFocalPoint = details.localFocalPoint;
         }
         
-        // Обновляем трансформацию с плавностью
         _transform = Matrix4.identity()
           ..translate(_offset.dx, _offset.dy, 0.0)
           ..scale(_scale, _scale, 1.0);
       });
     } else if (!_isZoomMode && currentStroke != null) {
-      // Режим рисования - продолжение линии
       try {
         final renderBox = _canvasContainerKey.currentContext?.findRenderObject() as RenderBox?;
         if (renderBox == null) return;
@@ -198,15 +188,13 @@ class _DrawPageState extends State<DrawPage> {
 
   void _handleScaleEnd(ScaleEndDetails details) {
     if (_isZoomMode) {
-      // Сохраняем текущие значения для следующего жеста
       _lastFocalPoint = null;
       _lastScale = _scale;
       _isPanning = false;
       
-      // Плавная фиксация позиции (добавляем инерцию)
       if (details.velocity.pixelsPerSecond.distanceSquared > 100) {
         final velocity = details.velocity.pixelsPerSecond;
-        final offsetDelta = velocity * 0.02; // Множитель инерции
+        final offsetDelta = velocity * 0.02;
         
         setState(() {
           _offset += offsetDelta;
@@ -228,7 +216,6 @@ class _DrawPageState extends State<DrawPage> {
     setState(() {
       _isZoomMode = !_isZoomMode;
       if (_isZoomMode) {
-        // При входе в режим масштабирования - немного увеличиваем
         _scale = _scale == 1.0 ? 1.5 : _scale;
         _transform = Matrix4.identity()
           ..translate(_offset.dx, _offset.dy, 0.0)
@@ -292,7 +279,6 @@ class _DrawPageState extends State<DrawPage> {
           ),
           body: Stack(
             children: [
-              // ХОЛСТ - нижний слой
               Positioned.fill(
                 top: 110,
                 bottom: 0,
@@ -331,7 +317,6 @@ class _DrawPageState extends State<DrawPage> {
                 ),
               ),
 
-              // ФИКСИРОВАННАЯ панель инструментов (сверху) - верхний слой
               Positioned(
                 top: 0,
                 left: 0,
@@ -353,7 +338,6 @@ class _DrawPageState extends State<DrawPage> {
                   ),
                   child: Column(
                     children: [
-                      // Верхняя строка - основные инструменты
                       SizedBox(
                         height: 50,
                         child: Scrollbar(
@@ -391,7 +375,6 @@ class _DrawPageState extends State<DrawPage> {
                         ),
                       ),
                       
-                      // Нижняя строка - сохранение и размер кисти
                       Container(
                         height: 60,
                         padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -472,7 +455,6 @@ class _DrawPageState extends State<DrawPage> {
                 ),
               ),
 
-              // Индикатор состояния режима масштабирования
               if (_isZoomMode)
                 Positioned(
                   top: 120,
@@ -503,7 +485,6 @@ class _DrawPageState extends State<DrawPage> {
             ],
           ),
 
-          // Панель настроек цветов
           bottomSheet: showPanel
               ? Container(
                   height: 150,
@@ -651,7 +632,6 @@ class _DrawPageState extends State<DrawPage> {
     );
   }
 
-  // Компактные кнопки для панели инструментов
   Widget _compactToolBtn(IconData icon, String tooltip, VoidCallback onPressed) {
     return Tooltip(
       message: tooltip,
@@ -926,28 +906,28 @@ class _DrawPageState extends State<DrawPage> {
       ),
     );
   }
-
-  Widget _buildInfoRow(String label, String value) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 2),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            '$label ',
-            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+  
+Widget _buildInfoRow(String label, String value) {
+  return Padding(
+    padding: const EdgeInsets.symmetric(vertical: 2),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          '$label ',
+          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+        ),
+        Expanded(
+          child: Text(
+            value,
+            style: const TextStyle(fontSize: 12, color: Colors.grey),
+            overflow: TextOverflow.ellipsis,
           ),
-          Expanded(
-            child: Text(
-              value,
-              style: const TextStyle(fontSize: 12, color: Colors.grey),
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
+        ),
+      ],
+    ),
+  );
+}
 
   void _showSaveDialog(String filePath, String fileName, String location, int width, int height) {
     if (!mounted) return;
@@ -1068,6 +1048,10 @@ class _DrawPageState extends State<DrawPage> {
     try {
       _showLoadingIndicator();
 
+      final user = FirebaseAuth.instance.currentUser;
+      String userName = user?.displayName ?? 'Аноним';
+
+      // Создаем изображение
       final recorder = ui.PictureRecorder();
       final canvas = Canvas(recorder);
 
@@ -1081,7 +1065,7 @@ class _DrawPageState extends State<DrawPage> {
           ..color = stroke.isEraser ? Colors.white : stroke.color
           ..strokeWidth = stroke.width
           ..strokeCap = StrokeCap.round
-          ..style =  PaintingStyle.stroke;
+          ..style = PaintingStyle.stroke;
 
         if (stroke.points.length > 1) {
           final path = Path();
@@ -1102,22 +1086,26 @@ class _DrawPageState extends State<DrawPage> {
           await image.toByteData(format: ui.ImageByteFormat.png);
       final bytes = byteData!.buffer.asUint8List();
 
-      final ref = FirebaseStorage.instance.ref().child(
-          'sketches/${canvasSize.width.toInt()}x${canvasSize.height.toInt()}_${DateTime.now().millisecondsSinceEpoch}.png');
-      await ref.putData(bytes);
-      final url = await ref.getDownloadURL();
+      // Конвертируем в Base64
+      final base64Image = 'data:image/png;base64,${base64Encode(bytes)}';
 
-      await FirebaseFirestore.instance.collection('sketches').add({
-        'imageUrl': url,
-        'caption': caption,
-        'authorName': FirebaseAuth.instance.currentUser?.displayName ?? 'Аноним',
-        'authorId': FirebaseAuth.instance.currentUser?.uid,
-        'canvasSize': {'width': canvasSize.width, 'height': canvasSize.height},
-        'timestamp': FieldValue.serverTimestamp(),
-        'toolCount': strokes.length,
-        'dimensions': '${canvasSize.width.toInt()}x${canvasSize.height.toInt()}',
-        
-      });
+      // Создаем объект скетча
+      final sketch = {
+        'id': DateTime.now().millisecondsSinceEpoch.toString(),
+        'imageBase64': base64Image,
+        'authorName': userName,
+        'caption': caption.isNotEmpty ? caption : null,
+        'timestamp': DateTime.now().toIso8601String(),
+        'likeCount': 0,
+        'canvasSize': {
+          'width': canvasSize.width,
+          'height': canvasSize.height,
+        },
+      };
+
+      // Сохраняем через провайдер
+      final provider = Provider.of<SketchesProvider>(context, listen: false);
+      await provider.addSketch(sketch);
 
       _hideLoadingIndicator();
       _showMessage('Успешно опубликовано в ленту!');
@@ -1126,7 +1114,6 @@ class _DrawPageState extends State<DrawPage> {
       if (mounted) {
         Navigator.of(context).pop();
       }
-
     } catch (e) {
       _hideLoadingIndicator();
       _showMessage('Ошибка публикации: $e', isError: true);
@@ -1160,13 +1147,11 @@ class SketchPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    // Белый фон холста
     canvas.drawRect(
       Rect.fromLTWH(0, 0, size.width, size.height),
       Paint()..color = Colors.white,
     );
     
-    // Рисуем все сохранённые линии
     for (final stroke in strokes) {
       final paint = Paint()
         ..color = stroke.isEraser ? Colors.white : stroke.color
@@ -1184,7 +1169,6 @@ class SketchPainter extends CustomPainter {
       }
     }
     
-    // Рисуем текущую линию (если есть)
     if (currentStroke != null) {
       final paint = Paint()
         ..color = currentStroke!.isEraser ? Colors.white : currentStroke!.color
@@ -1203,10 +1187,8 @@ class SketchPainter extends CustomPainter {
     }
   }
 
-  // ДОБАВЛЕННЫЙ МЕТОД - исправляет ошибку компиляции
   @override
   bool shouldRepaint(covariant SketchPainter oldDelegate) {
-    // Перерисовываем если количество линий изменилось или изменилась текущая линия
     return oldDelegate.strokes.length != strokes.length ||
            oldDelegate.currentStroke != currentStroke;
   }

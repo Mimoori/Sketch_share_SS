@@ -289,7 +289,7 @@ class _ProfilePageState extends State<ProfilePage> {
                     ElevatedButton(
                       onPressed: _saveProfile,
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.deepPurple,
+                        backgroundColor: const Color.fromARGB(255, 10, 1, 24),
                         minimumSize: const Size(double.infinity, 50),
                       ),
                       child: const Text(
@@ -323,35 +323,35 @@ class _ProfilePageState extends State<ProfilePage> {
                   
                   const SizedBox(height: 20),
                   
-                  // Статистика
-                  Container(
-                    padding: const EdgeInsets.all(20),
-                    decoration: BoxDecoration(
-                      color: Colors.grey[100],
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Column(
-                      children: [
-                        Text(
-                          'Статистика',
-                          style: TextStyle(
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold,
-                            color: Colors.grey[800],
-                          ),
-                        ),
-                        const SizedBox(height: 15),
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceAround,
-                          children: [
-                            _buildStatItem('0', 'Рисунков'),
-                            _buildStatItem('0', 'Лайков'),
-                            _buildStatItem('0', 'Подписчиков'),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
+                  // // Статистика
+                  // Container(
+                  //   padding: const EdgeInsets.all(20),
+                  //   decoration: BoxDecoration(
+                  //     color: Colors.grey[100],
+                  //     borderRadius: BorderRadius.circular(12),
+                  //   ),
+                  //   child: Column(
+                  //     children: [
+                  //       Text(
+                  //         'Статистика',
+                  //         style: TextStyle(
+                  //           fontSize: 18,
+                  //           fontWeight: FontWeight.bold,
+                  //           color: Colors.grey[800],
+                  //         ),
+                  //       ),
+                  //       const SizedBox(height: 15),
+                  //       Row(
+                  //         mainAxisAlignment: MainAxisAlignment.spaceAround,
+                  //         children: [
+                  //           _buildStatItem('0', 'Рисунков'),
+                  //           _buildStatItem('0', 'Лайков'),
+                  //           _buildStatItem('0', 'Подписчиков'),
+                  //         ],
+                  //       ),
+                  //     ],
+                  //   ),
+                  // ),
                 ],
               ),
             ),

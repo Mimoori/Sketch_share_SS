@@ -1,4 +1,3 @@
-// lib/main.dart
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -9,6 +8,7 @@ import 'pages/feed_page.dart';
 import 'pages/login_page.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'dart:convert';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -21,9 +21,11 @@ void main() async {
 // Провайдер для управления темой
 class ThemeProvider extends ChangeNotifier {
   ThemeMode _themeMode = ThemeMode.system;
+  bool _isLoading = true;
   
   ThemeMode get themeMode => _themeMode;
   bool get isDarkMode => _themeMode == ThemeMode.dark;
+  bool get isLoading => _isLoading;
   
   ThemeProvider() {
     _loadTheme();
@@ -45,9 +47,11 @@ class ThemeProvider extends ChangeNotifier {
           _themeMode = ThemeMode.system;
       }
     } catch (e) {
-      print('Ошибка загрузки темы: $e');
+      _themeMode = ThemeMode.system;
+    } finally {
+      _isLoading = false;
+      notifyListeners();
     }
-    notifyListeners();
   }
   
   Future<void> setThemeMode(ThemeMode mode) async {
@@ -72,15 +76,139 @@ class ThemeProvider extends ChangeNotifier {
   }
 }
 
+// Создайте этот файл: lib/providers/sketches_provider.dart
+class SketchesProvider extends ChangeNotifier {
+  List<Map<String, dynamic>> _sketches = [];
+  List<String> _likedSketchIds = [];
+  
+  List<Map<String, dynamic>> get sketches => _sketches;
+  List<String> get likedSketchIds => _likedSketchIds;
+  
+  SketchesProvider() {
+    _loadSketches();
+  }
+  
+  Future<void> _loadSketches() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final sketchesJson = prefs.getString('sketches');
+      
+      if (sketchesJson != null) {
+        _sketches = (jsonDecode(sketchesJson) as List<dynamic>)
+            .cast<Map<String, dynamic>>();
+        
+        final likedJson = prefs.getString('liked_sketch_ids');
+        if (likedJson != null) {
+          _likedSketchIds = (jsonDecode(likedJson) as List<dynamic>).cast<String>();
+        }
+      }
+    } catch (e) {
+      print('Ошибка загрузки скетчей: $e');
+    }
+    notifyListeners();
+  }
+  
+  Future<void> saveSketches() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('sketches', jsonEncode(_sketches));
+      await prefs.setString('liked_sketch_ids', jsonEncode(_likedSketchIds));
+    } catch (e) {
+      print('Ошибка сохранения скетчей: $e');
+    }
+  }
+  
+  Future<void> addSketch(Map<String, dynamic> sketch) async {
+    _sketches.insert(0, sketch);
+    await saveSketches();
+    notifyListeners();
+  }
+  
+  Future<void> deleteSketch(String sketchId) async {
+    _sketches.removeWhere((sketch) => sketch['id'] == sketchId);
+    await saveSketches();
+    notifyListeners();
+  }
+  
+  Future<void> toggleLike(String sketchId) async {
+    if (_likedSketchIds.contains(sketchId)) {
+      _likedSketchIds.remove(sketchId);
+    } else {
+      _likedSketchIds.add(sketchId);
+    }
+    await saveSketches();
+    notifyListeners();
+  }
+  
+  bool isLiked(String sketchId) {
+    return _likedSketchIds.contains(sketchId);
+  }
+}
+
+// Необходимые конвертеры
+Map<String, dynamic> _convertSketchToMap({
+  required String id,
+  required String imageBase64,
+  required String authorName,
+  String? caption,
+  required int width,
+  required int height,
+  int likeCount = 0,
+}) {
+  return {
+    'id': id,
+    'imageBase64': imageBase64,
+    'authorName': authorName,
+    'caption': caption,
+    'timestamp': DateTime.now().toIso8601String(),
+    'likeCount': likeCount,
+    'canvasSize': {'width': width, 'height': height},
+  };
+}
+
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return ChangeNotifierProvider(
-      create: (context) => ThemeProvider(),
+    return MultiProvider(
+      providers: [
+        ChangeNotifierProvider(create: (context) => ThemeProvider()),
+        ChangeNotifierProvider(create: (context) => SketchesProvider()),
+      ],
       child: Consumer<ThemeProvider>(
         builder: (context, themeProvider, child) {
+          if (themeProvider.isLoading) {
+            return MaterialApp(
+              home: Scaffold(
+                backgroundColor: Colors.white,
+                body: Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Icon(
+                        Icons.brush,
+                        size: 80,
+                        color: Colors.deepPurple,
+                      ),
+                      const SizedBox(height: 20),
+                      const CircularProgressIndicator(
+                        color: Colors.deepPurple,
+                      ),
+                      const SizedBox(height: 20),
+                      Text(
+                        'Загрузка темы...',
+                        style: TextStyle(
+                          color: Colors.grey[600],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          }
+          
           return MaterialApp(
             title: 'SketchShare',
             theme: ThemeData.light().copyWith(
@@ -94,6 +222,10 @@ class MyApp extends StatelessWidget {
                 foregroundColor: Colors.white,
                 centerTitle: true,
               ),
+              floatingActionButtonTheme: const FloatingActionButtonThemeData(
+                backgroundColor: Colors.deepPurple,
+                foregroundColor: Colors.white,
+              ),
             ),
             darkTheme: ThemeData.dark().copyWith(
               colorScheme: ColorScheme.fromSeed(
@@ -105,6 +237,10 @@ class MyApp extends StatelessWidget {
                 backgroundColor: Colors.deepPurple,
                 foregroundColor: Colors.white,
                 centerTitle: true,
+              ),
+              floatingActionButtonTheme: const FloatingActionButtonThemeData(
+                backgroundColor: Colors.deepPurple,
+                foregroundColor: Colors.white,
               ),
             ),
             themeMode: themeProvider.themeMode,
@@ -134,7 +270,6 @@ class _AppStartState extends State<AppStart> {
   }
 
   Future<void> _initializeApp() async {
-    // Имитация загрузки
     await Future.delayed(const Duration(milliseconds: 500));
     setState(() {
       _isInitializing = false;
@@ -159,6 +294,15 @@ class _AppStartState extends State<AppStart> {
               CircularProgressIndicator(
                 color: Colors.white,
               ),
+              SizedBox(height: 20),
+              Text(
+                'SketchShare',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 24,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
             ],
           ),
         ),
@@ -175,7 +319,6 @@ class _AppStartState extends State<AppStart> {
         }
 
         if (snapshot.hasData && snapshot.data != null) {
-          // Пользователь авторизован
           final user = snapshot.data!;
           WidgetsBinding.instance.addPostFrameCallback((_) {
             _createUserIfNeeded(user);
@@ -183,7 +326,6 @@ class _AppStartState extends State<AppStart> {
           return const FeedPage();
         }
 
-        // Пользователь не авторизован - показываем WelcomePage
         return const WelcomePage();
       },
     );
@@ -200,9 +342,15 @@ class _AppStartState extends State<AppStart> {
             'email': user.email ?? '',
             'createdAt': FieldValue.serverTimestamp(),
             'lastSeen': FieldValue.serverTimestamp(),
+            'sketchesCount': 0,
+            'likesCount': 0,
           }, SetOptions(merge: true));
     } catch (e) {
       print('Ошибка создания пользователя: $e');
     }
   }
 }
+
+// Для JSON конвертации
+Map<String, dynamic> jsonDecode(String json) => jsonDecode(json);
+String jsonEncode(dynamic object) => jsonEncode(object);
