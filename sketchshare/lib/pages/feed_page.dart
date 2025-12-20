@@ -3,9 +3,11 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import '../main.dart'; // Импортируем ThemeProvider и SketchesProvider из main.dart
+import 'package:url_launcher/url_launcher.dart';
+import '../main.dart';
 import 'draw_page.dart';
 import 'profile_page.dart';
+import 'notifications_page.dart'; // Добавляем импорт страницы уведомлений
 
 class FeedPage extends StatelessWidget {
   const FeedPage({super.key});
@@ -50,6 +52,21 @@ class FeedPage extends StatelessWidget {
                 MaterialPageRoute(builder: (_) => const ProfilePage())
               ),
             ),
+            // ↓↓↓ ДОБАВЛЯЕМ ПУНКТ УВЕДОМЛЕНИЙ ↓↓↓
+            ListTile(
+              leading: const Icon(Icons.notifications),
+              title: const Text('Уведомления'),
+              onTap: () => Navigator.push(context,
+                  MaterialPageRoute(builder: (_) => const NotificationsPage())),
+            ),
+            // ↑↑↑ ДОБАВЛЯЕМ ПУНКТ УВЕДОМЛЕНИЙ ↑↑↑
+            // ↓↓↓ ДОБАВЛЯЕМ ПУНКТ ДОКУМЕНТАЦИИ ↓↓↓
+            ListTile(
+              leading: const Icon(Icons.menu_book, color: Colors.blue),
+              title: const Text('Документация', style: TextStyle(color: Colors.blue)),
+              onTap: () => _openDocumentation(context),
+            ),
+            // ↑↑↑ ДОБАВЛЯЕМ ПУНКТ ДОКУМЕНТАЦИИ ↑↑↑
             Consumer<ThemeProvider>(
               builder: (context, themeProvider, child) {
                 return ListTile(
@@ -111,10 +128,6 @@ class FeedPage extends StatelessWidget {
                   style: TextStyle(fontSize: 14, color: Colors.grey),
                 ),
                 const SizedBox(height: 8),
-                const Text(
-                  'Рисуйте и сохраняйте свои работы локально',
-                  style: TextStyle(fontSize: 12, color: Colors.grey),
-                ),
               ],
             ),
           ),
@@ -331,6 +344,35 @@ class FeedPage extends StatelessWidget {
     );
   }
 
+  // Метод для открытия документации
+  Future<void> _openDocumentation(BuildContext context) async {
+    // ЗАМЕНИТЕ ЭТОТ URL НА СВОЙ (если нужно GitHub Pages)
+    const docsUrl = 'https://mimoori.github.io/Sketch_share_SS/#/';
+    
+    try {
+      if (await canLaunchUrl(Uri.parse(docsUrl))) {
+        await launchUrl(
+          Uri.parse(docsUrl),
+          mode: LaunchMode.externalApplication,
+        );
+      } else {
+        if (!context.mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Не удалось открыть документацию'),
+          ),
+        );
+      }
+    } catch (e) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Ошибка: $e'),
+        ),
+      );
+    }
+  }
+
   void _toggleLike(BuildContext context, String sketchId) {
     final provider = Provider.of<SketchesProvider>(context, listen: false);
     provider.toggleLike(sketchId);
@@ -507,6 +549,8 @@ class FeedPage extends StatelessWidget {
       ),
     );
   }
+
+
 
   Widget _buildDetailItem(IconData icon, String text) {
     return Column(
