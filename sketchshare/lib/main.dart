@@ -1,24 +1,27 @@
+import 'dart:convert';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:provider/provider.dart';
 import 'firebase_options.dart';
+import 'services/auth_service.dart';
 import 'pages/welcome_page.dart';
 import 'pages/feed_page.dart';
+import 'pages/registration_page.dart';
 import 'pages/login_page.dart';
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
-import 'dart:convert';
+import 'package:firebase_auth/firebase_auth.dart' as firebase_auth;
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp(
     options: DefaultFirebaseOptions.currentPlatform,
   );
+  
+  print('=== Firebase инициализирован ===');
+  
   runApp(const MyApp());
 }
 
-// Провайдер для управления темой
 class ThemeProvider extends ChangeNotifier {
   ThemeMode _themeMode = ThemeMode.system;
   bool _isLoading = true;
@@ -145,6 +148,7 @@ class SketchesProvider extends ChangeNotifier {
   }
 }
 
+
 // Необходимые конвертеры
 Map<String, dynamic> _convertSketchToMap({
   required String id,
@@ -175,6 +179,7 @@ class MyApp extends StatelessWidget {
       providers: [
         ChangeNotifierProvider(create: (context) => ThemeProvider()),
         ChangeNotifierProvider(create: (context) => SketchesProvider()),
+        Provider<AuthService>(create: (_) => AuthService()),
       ],
       child: Consumer<ThemeProvider>(
         builder: (context, themeProvider, child) {
@@ -244,7 +249,13 @@ class MyApp extends StatelessWidget {
               ),
             ),
             themeMode: themeProvider.themeMode,
-            home: const AppStart(),
+            home: const AuthChecker(),
+            routes: {
+              '/welcome': (context) => const WelcomePage(),
+              '/register': (context) => const RegistrationPage(),
+              '/login': (context) => const LoginPage(),
+              '/feed': (context) => const FeedPage(),
+            },
             debugShowCheckedModeBanner: false,
           );
         },
@@ -253,104 +264,90 @@ class MyApp extends StatelessWidget {
   }
 }
 
-class AppStart extends StatefulWidget {
-  const AppStart({super.key});
-
-  @override
-  State<AppStart> createState() => _AppStartState();
-}
-
-class _AppStartState extends State<AppStart> {
-  bool _isInitializing = true;
-
-  @override
-  void initState() {
-    super.initState();
-    _initializeApp();
-  }
-
-  Future<void> _initializeApp() async {
-    await Future.delayed(const Duration(milliseconds: 500));
-    setState(() {
-      _isInitializing = false;
-    });
-  }
+class AuthChecker extends StatelessWidget {
+  const AuthChecker({super.key});
 
   @override
   Widget build(BuildContext context) {
-    if (_isInitializing) {
-      return const Scaffold(
-        backgroundColor: Colors.deepPurple,
-        body: Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(
-                Icons.brush,
-                size: 80,
-                color: Colors.white,
-              ),
-              SizedBox(height: 20),
-              CircularProgressIndicator(
-                color: Colors.white,
-              ),
-              SizedBox(height: 20),
-              Text(
-                'SketchShare',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 24,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-            ],
-          ),
-        ),
-      );
-    }
-
-    return StreamBuilder<User?>(
-      stream: FirebaseAuth.instance.authStateChanges(),
+    final authService = Provider.of<AuthService>(context);
+    
+    return StreamBuilder<firebase_auth.User?>(
+      stream: authService.authStateChanges,
       builder: (context, snapshot) {
+        print('=== AuthChecker ===');
+        print('Connection state: ${snapshot.connectionState}');
+        print('Has data: ${snapshot.hasData}');
+        print('Data: ${snapshot.data?.email}');
+        print('Error: ${snapshot.error}');
+        
+        // Показываем индикатор загрузки пока идет проверка
         if (snapshot.connectionState == ConnectionState.waiting) {
           return const Scaffold(
-            body: Center(child: CircularProgressIndicator()),
+            backgroundColor: Colors.deepPurple,
+            body: Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(
+                    Icons.brush,
+                    size: 80,
+                    color: Colors.white,
+                  ),
+                  SizedBox(height: 20),
+                  CircularProgressIndicator(
+                    color: Colors.white,
+                  ),
+                  SizedBox(height: 20),
+                  Text(
+                    'Проверка авторизации...',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                    ),
+                  ),
+                ],
+              ),
+            ),
           );
         }
-
+        
+        // Если есть ошибка
+        if (snapshot.hasError) {
+          print('Ошибка в StreamBuilder: ${snapshot.error}');
+          return Scaffold(
+            body: Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Icon(Icons.error, color: Colors.red, size: 60),
+                  const SizedBox(height: 20),
+                  Text('Ошибка: ${snapshot.error}'),
+                  const SizedBox(height: 20),
+                  ElevatedButton(
+                    onPressed: () => Navigator.pushReplacementNamed(context, '/welcome'),
+                    child: const Text('На главную'),
+                  ),
+                ],
+              ),
+            ),
+          );
+        }
+        
+        // Если пользователь авторизован - показываем FeedPage
         if (snapshot.hasData && snapshot.data != null) {
           final user = snapshot.data!;
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            _createUserIfNeeded(user);
-          });
+          print('=== ПОЛЬЗОВАТЕЛЬ АВТОРИЗОВАН ===');
+          print('UID: ${user.uid}');
+          print('Email: ${user.email}');
+          print('Display name: ${user.displayName}');
+          
           return const FeedPage();
         }
-
+        
+        // Если пользователь не авторизован - показываем WelcomePage
+        print('=== ПОЛЬЗОВАТЕЛЬ НЕ АВТОРИЗОВАН ===');
         return const WelcomePage();
       },
     );
   }
-
-  Future<void> _createUserIfNeeded(User user) async {
-    try {
-      await FirebaseFirestore.instance
-          .collection('users')
-          .doc(user.uid)
-          .set({
-            'uid': user.uid,
-            'name': user.displayName ?? 'Аноним',
-            'email': user.email ?? '',
-            'createdAt': FieldValue.serverTimestamp(),
-            'lastSeen': FieldValue.serverTimestamp(),
-            'sketchesCount': 0,
-            'likesCount': 0,
-          }, SetOptions(merge: true));
-    } catch (e) {
-      print('Ошибка создания пользователя: $e');
-    }
-  }
 }
-
-// Для JSON конвертации
-Map<String, dynamic> jsonDecode(String json) => jsonDecode(json);
-String jsonEncode(dynamic object) => jsonEncode(object);

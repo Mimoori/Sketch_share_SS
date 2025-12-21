@@ -249,53 +249,6 @@ class _NotificationsPageState extends State<NotificationsPage> {
   Widget _buildNotificationsList(List<QueryDocumentSnapshot> docs) {
     return Column(
       children: [
-        // Шапка с кнопкой документации
-        Container(
-          padding: const EdgeInsets.all(16),
-          color: Colors.blue[50],
-          child: Column(
-            children: [
-              const Row(
-                children: [
-                  Icon(Icons.menu_book, color: Colors.blue),
-                  SizedBox(width: 10),
-                  Text(
-                    'Документация приложения',
-                    style: TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.blue,
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 10),
-              ElevatedButton.icon(
-                onPressed: () {
-                  setState(() {
-                    _showDocumentation = true;
-                  });
-                },
-                icon: const Icon(Icons.open_in_new),
-                label: const Text('📖 ОТКРЫТЬ ДОКУМЕНТАЦИЮ'),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.deepPurple,
-                  foregroundColor: Colors.white,
-                  minimumSize: const Size(double.infinity, 50),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 5),
-              const Text(
-                'Документация загружается с хостинга GitHub Pages',
-                style: TextStyle(fontSize: 12, color: Colors.grey),
-                textAlign: TextAlign.center,
-              ),
-            ],
-          ),
-        ),
         
         const SizedBox(height: 10),
         

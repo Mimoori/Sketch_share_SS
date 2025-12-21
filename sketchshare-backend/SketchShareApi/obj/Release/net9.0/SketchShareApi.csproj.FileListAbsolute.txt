@@ -1,0 +1,9 @@
+C:\Users\Viktoria\Desktop\Sketch_project\sketchshare-backend\SketchShareApi\obj\Release\net9.0\SketchShareApi.csproj.AssemblyReference.cache
+C:\Users\Viktoria\Desktop\Sketch_project\sketchshare-backend\SketchShareApi\obj\Release\net9.0\rpswa.dswa.cache.json
+C:\Users\Viktoria\Desktop\Sketch_project\sketchshare-backend\SketchShareApi\obj\Release\net9.0\SketchShareApi.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\Viktoria\Desktop\Sketch_project\sketchshare-backend\SketchShareApi\obj\Release\net9.0\SketchShareApi.AssemblyInfoInputs.cache
+C:\Users\Viktoria\Desktop\Sketch_project\sketchshare-backend\SketchShareApi\obj\Release\net9.0\SketchShareApi.AssemblyInfo.cs
+C:\Users\Viktoria\Desktop\Sketch_project\sketchshare-backend\SketchShareApi\obj\Release\net9.0\SketchShareApi.csproj.CoreCompileInputs.cache
+C:\Users\Viktoria\Desktop\Sketch_project\sketchshare-backend\SketchShareApi\obj\Release\net9.0\SketchShareApi.MvcApplicationPartsAssemblyInfo.cs
+C:\Users\Viktoria\Desktop\Sketch_project\sketchshare-backend\SketchShareApi\obj\Release\net9.0\SketchShareApi.MvcApplicationPartsAssemblyInfo.cache
+C:\Users\Viktoria\Desktop\Sketch_project\sketchshare-backend\SketchShareApi\obj\Release\net9.0\SketchShareApi.sourcelink.json
