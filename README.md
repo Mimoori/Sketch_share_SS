@@ -1,6 +1,6 @@
 # Sketch_share_SS
 
-![Логотип SketchShare](images/sketchshare-logo.png)
+![Логотип SketchShare](.doc/images/sketchshare-logo.png)
 
 ## Оглавление
 - [Введение](guide/introduction.md)
